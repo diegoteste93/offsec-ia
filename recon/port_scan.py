@@ -612,21 +612,3 @@ def enrich_recon_file(recon_file: Path) -> dict:
 
     return enriched
 
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Naabu Port Scanner for RedAmon")
-    parser.add_argument("recon_file", nargs="?", help="Path to recon JSON file to enrich")
-    args = parser.parse_args()
-
-    if args.recon_file:
-        enriched = enrich_recon_file(Path(args.recon_file))
-        print(f"\n[✓] Enrichment complete")
-
-        summary = enriched.get("port_scan", {}).get("summary", {})
-        print(f"    Hosts: {summary.get('hosts_with_open_ports', 0)}")
-        print(f"    Ports: {summary.get('total_open_ports', 0)}")
-    else:
-        print("Usage: python naabu_scan.py <recon_file.json>")
-        print("\nThis module is typically called from main.py as part of the scan pipeline.")

@@ -1472,22 +1472,3 @@ def enrich_recon_file(recon_file: Path) -> dict:
     enriched = run_http_probe(recon_data, output_file=recon_file)
 
     return enriched
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="httpx HTTP Prober for RedAmon")
-    parser.add_argument("recon_file", nargs="?", help="Path to recon JSON file to enrich")
-    args = parser.parse_args()
-
-    if args.recon_file:
-        enriched = enrich_recon_file(Path(args.recon_file))
-        print(f"\n[✓] Enrichment complete")
-
-        summary = enriched.get("http_probe", {}).get("summary", {})
-        print(f"    Live URLs: {summary.get('live_urls', 0)}")
-        print(f"    Technologies: {summary.get('technology_count', 0)}")
-    else:
-        print("Usage: python httpx_scan.py <recon_file.json>")
-        print("\nThis module is typically called from main.py as part of the scan pipeline.")

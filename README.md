@@ -27,29 +27,29 @@ python recon/main.py
 RedAmon executes scans in a modular pipeline. Each module adds data to a single JSON output file.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         RedAmon Scanning Pipeline                           │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌───────────┐  │
-│  │  domain_     │───►│  port_scan   │───►│  http_probe  │───►│ vuln_scan │  │
-│  │  discovery   │    │              │    │              │    │           │  │
-│  │  • WHOIS     │    │  • Port scan │    │  • HTTP probe│    │  • Web    │  │
-│  │  • DNS       │    │  • CDN detect│    │  • Tech detect│   │    vulns  │  │
-│  │  • Subdomains│    │  • Services  │    │  • TLS/SSL   │    │  • CVEs   │  │
-│  └──────────────┘    └──────────────┘    └──────────────┘    └───────────┘  │
-│         │                   │                   │                   │       │
-│         └───────────────────┴───────────────────┴───────────────────┘       │
-│                                     │                                       │
-│                                     ▼                                       │
-│                    📄 recon/output/recon_<domain>.json                      │
-│                                                                             │
-│  Optional: ┌───────────┐                                                    │
-│            │  github   │ ──► github_secrets_<org>.json                      │
-│            │  • Secrets│                                                    │
-│            │  • Leaks  │                                                    │
-│            └───────────┘                                                    │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────────────────┐
+│                              RedAmon Scanning Pipeline                                │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                       │
+│  ┌────────────┐   ┌────────────┐   ┌────────────┐   ┌───────────┐   ┌──────────────┐  │
+│  │  domain_   │──►│ port_scan  │──►│ http_probe │──►│ vuln_scan │──►│  add_mitre   │  │
+│  │  discovery │   │            │   │            │   │           │   │              │  │
+│  │  • WHOIS   │   │ • Port scan│   │ • HTTP     │   │ • Web     │   │ • CWE        │  │
+│  │  • DNS     │   │ • CDN      │   │ • Tech     │   │   vulns   │   │   weakness   │  │
+│  │  • Subs    │   │ • Services │   │ • TLS/SSL  │   │ • CVEs    │   │ • CAPEC      │  │
+│  └────────────┘   └────────────┘   └────────────┘   └───────────┘   └──────────────┘  │
+│        │                │                │                │                │          │
+│        └────────────────┴────────────────┴────────────────┴────────────────┘          │
+│                                          │                                            │
+│                                          ▼                                            │
+│                       📄 recon/output/recon_<domain>.json                             │
+│                                                                                       │
+│  Optional: ┌───────────┐                                                              │
+│            │  github   │ ──► github_secrets_<org>.json                                │
+│            │  • Secrets│                                                              │
+│            │  • Leaks  │                                                              │
+│            └───────────┘                                                              │
+└───────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -62,7 +62,7 @@ Edit `params.py`:
 
 ```python
 # Run all modules (recommended for full assessment)
-SCAN_MODULES = ["domain_discovery", "port_scan", "http_probe", "vuln_scan", "github"]
+SCAN_MODULES = ["domain_discovery", "port_scan", "http_probe", "vuln_scan", "add_mitre", "github"]
 
 # Quick recon only (no vulnerability scanning)
 SCAN_MODULES = ["domain_discovery"]
@@ -70,8 +70,11 @@ SCAN_MODULES = ["domain_discovery"]
 # Port scan + HTTP probing (skip vulnerability scanning)
 SCAN_MODULES = ["domain_discovery", "port_scan", "http_probe"]
 
-# Update existing scan with just vulnerability scanning
-SCAN_MODULES = ["vuln_scan"]
+# Full scan with MITRE enrichment (no GitHub)
+SCAN_MODULES = ["domain_discovery", "port_scan", "http_probe", "vuln_scan", "add_mitre"]
+
+# Enrich existing CVE data with CWE/CAPEC
+SCAN_MODULES = ["add_mitre"]
 ```
 
 ---
@@ -207,6 +210,77 @@ GITHUB_MAX_COMMITS = 100                 # Commits per repo
 
 ---
 
+### Module 6: `add_mitre` - CWE/CAPEC Enrichment
+
+**Purpose:** Enrich discovered CVEs with MITRE CWE weaknesses and CAPEC attack patterns.
+
+| What It Adds | Description |
+|--------------|-------------|
+| **CWE Hierarchy** | Nested parent-child structure from broad to specific weakness |
+| **CWE Metadata** | Name, abstraction level (Pillar/Class/Base/Variant), mapping status |
+| **Rich Details** | For ALLOWED CWEs: description, consequences, mitigations, detection methods, examples |
+| **CAPEC Patterns** | Detailed attack patterns with severity, execution flow, examples |
+
+**Enrichment Chain:**
+```
+CVE → CWE Hierarchy (root→leaf) → CAPEC (on ALLOWED CWEs only)
+```
+
+> **Note:** ATT&CK techniques and D3FEND defenses are intentionally NOT included. The CVE2CAPEC database derives these from generic parent CWEs, resulting in inaccurate mappings. Only direct CWE→CAPEC mappings from ALLOWED CWEs are used for accuracy.
+
+**Example Output:**
+```json
+{
+  "id": "CVE-2021-3618",
+  "mitre_attack": {
+    "enriched": true,
+    "cwe_hierarchy": {
+      "id": "CWE-284",
+      "name": "Improper Access Control",
+      "abstraction": "Pillar",
+      "mapping": "DISCOURAGED",
+      "child": {
+        "id": "CWE-287",
+        "name": "Improper Authentication",
+        "abstraction": "Class",
+        "mapping": "DISCOURAGED",
+        "child": {
+          "id": "CWE-295",
+          "name": "Improper Certificate Validation",
+          "abstraction": "Base",
+          "mapping": "ALLOWED",
+          "description": "The product does not validate, or incorrectly validates, a certificate.",
+          "consequences": [{"scope": ["Integrity"], "impact": ["Bypass Protection Mechanism"]}],
+          "mitigations": [{"description": "Certificates should be carefully managed...", "phase": ["Implementation"]}],
+          "related_capec": [
+            {
+              "id": "CAPEC-459",
+              "name": "Creating a Rogue Certification Authority Certificate",
+              "description": "An adversary exploits a weakness in hashing algorithms...",
+              "likelihood": "Medium",
+              "severity": "Very High",
+              "execution_flow": [{"step": "1", "phase": "Experiment", "description": "..."}]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+**Key Parameters:**
+```python
+MITRE_AUTO_UPDATE_DB = True          # Auto-download latest CVE2CAPEC + CWE metadata
+MITRE_INCLUDE_CWE = True             # Include CWE hierarchy with metadata
+MITRE_INCLUDE_CAPEC = True           # Include CAPEC attack patterns
+MITRE_CACHE_TTL_HOURS = 24           # Database cache duration
+```
+
+📖 **Detailed documentation:** [readmes/README.MITRE.md](readmes/README.MITRE.md)
+
+---
+
 ## 🆚 Complete Tool Comparison
 
 Understanding what each tool does is crucial for effective reconnaissance. RedAmon uses 6 different tools in its pipeline.
@@ -220,6 +294,7 @@ Understanding what each tool does is crucial for effective reconnaissance. RedAm
 | **Naabu** | Port discovery | Layer 4 (Transport) | ⚡ Very Fast | Open ports, protocols |
 | **httpx** | HTTP probing & tech detection | Layer 7 (Application) | ⚡ Fast | Live URLs, technologies, TLS |
 | **Nuclei** | Vulnerability scanning | Layer 7 (Application) | 🔄 Medium | CVEs, misconfigs, vulns |
+| **MITRE CWE/CAPEC** | Weakness & attack pattern enrichment | Data Enrichment | ⚡ Fast | CWE weaknesses, CAPEC patterns |
 | **GVM/OpenVAS** | Deep vulnerability assessment | All Layers | 🐢 Slow | Full security audit |
 
 ---
@@ -433,6 +508,9 @@ CVEs found: 23 (2 CRITICAL, 10 HIGH)
 │       │              + CVE Lookup for detected technologies                     │
 │       │              (nginx, PHP, jQuery → query NVD for CVEs)                  │
 │       ▼                                                                         │
+│  🔗 MITRE CWE/CAPEC → Enrich CVEs with weakness & attack patterns               │
+│       │              (CVE → CWE hierarchy → CAPEC direct mappings)               │
+│       ▼                                                                         │
 │  🛡️ GVM (opt)    → Deep vulnerability assessment (if needed)                    │
 │                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────┘
@@ -504,6 +582,13 @@ NUCLEI_RATE_LIMIT = 100         # Requests per second
 NUCLEI_AUTO_UPDATE_TEMPLATES = True  # Get latest templates
 
 # ═══════════════════════════════════════════════════════════════════
+# MITRE CWE/CAPEC - Weakness & Attack Pattern Enrichment
+# ═══════════════════════════════════════════════════════════════════
+MITRE_AUTO_UPDATE_DB = True     # Auto-download CVE2CAPEC database
+MITRE_INCLUDE_CWE = True        # Include CWE weakness mappings
+MITRE_INCLUDE_CAPEC = True      # Include CAPEC attack patterns
+
+# ═══════════════════════════════════════════════════════════════════
 # GITHUB - Secret Hunting
 # ═══════════════════════════════════════════════════════════════════
 GITHUB_ACCESS_TOKEN = ""        # Set in .env file!
@@ -551,8 +636,13 @@ RedAmon/
 │   ├── port_scan.py       # Port scanning
 │   ├── http_probe.py      # HTTP probing
 │   ├── vuln_scan.py       # Vulnerability scanning
+│   ├── add_mitre.py       # MITRE CWE/CAPEC enrichment
 │   ├── github_secret_hunt.py  # GitHub secret hunting
-│   └── output/            # 📄 Scan results (JSON)
+│   ├── output/            # 📄 Scan results (JSON)
+│   └── data/
+│       └── mitre_db/      # 📦 Cached CVE2CAPEC database
+│           ├── resources/ # CWE, CAPEC mappings
+│           └── database/  # CVE-year.jsonl files
 │
 ├── gvm_scan/              # GVM/OpenVAS integration
 │   ├── main.py            # GVM scan entry point
@@ -562,7 +652,8 @@ RedAmon/
 │   ├── README.PORT_SCAN.md    # Port scan configuration guide
 │   ├── README.HTTP_PROBE.md   # HTTP probe configuration guide
 │   ├── README.VULN_SCAN.md    # Vulnerability scan configuration guide
-│   └── README.GVM.md      # GVM/OpenVAS setup guide
+│   ├── README.MITRE.md        # MITRE CWE/CAPEC enrichment guide
+│   └── README.GVM.md          # GVM/OpenVAS setup guide
 │
 └── docker-compose.yml     # GVM container orchestration
 ```
@@ -578,7 +669,11 @@ All modules write to a single JSON file: `recon/output/recon_<domain>.json`
   "metadata": {
     "target": "example.com",
     "scan_timestamp": "2024-01-15T10:30:00",
-    "modules_executed": ["whois", "subdomain_discovery", "port_scan", "http_probe", "vuln_scan"]
+    "modules_executed": ["whois", "subdomain_discovery", "port_scan", "http_probe", "vuln_scan", "add_mitre"],
+    "mitre_enrichment": {
+      "total_cves_processed": 23,
+      "total_cves_enriched": 23
+    }
   },
   "whois": {
     "registrar": "GoDaddy",
@@ -624,6 +719,35 @@ All modules write to a single JSON file: `recon/output/recon_<domain>.json`
       "critical": 0,
       "high": 1
     }
+  },
+  "technology_cves": {
+    "all_cves": [
+      {
+        "id": "CVE-2021-44228",
+        "cvss": 10.0,
+        "mitre_attack": {
+          "enriched": true,
+          "cwe_hierarchy": {
+            "id": "CWE-502",
+            "name": "Deserialization of Untrusted Data",
+            "abstraction": "Base",
+            "mapping": "ALLOWED",
+            "description": "The product deserializes untrusted data without sufficiently verifying...",
+            "consequences": [{"scope": ["Integrity"], "impact": ["Execute Unauthorized Code"]}],
+            "mitigations": [{"description": "If available, use signing/sealing features...", "phase": ["Architecture and Design"]}],
+            "related_capec": [
+              {
+                "id": "CAPEC-586",
+                "name": "Object Injection",
+                "description": "An adversary injects malicious object references...",
+                "severity": "High",
+                "likelihood": "Medium"
+              }
+            ]
+          }
+        }
+      }
+    ]
   }
 }
 ```
@@ -686,4 +810,5 @@ Unauthorized scanning is illegal in most jurisdictions. RedAmon is intended for:
 | Port Scan | [readmes/README.PORT_SCAN.md](readmes/README.PORT_SCAN.md) |
 | HTTP Probe | [readmes/README.HTTP_PROBE.md](readmes/README.HTTP_PROBE.md) |
 | Vuln Scan | [readmes/README.VULN_SCAN.md](readmes/README.VULN_SCAN.md) |
+| MITRE CWE/CAPEC | [readmes/README.MITRE.md](readmes/README.MITRE.md) |
 | GVM/OpenVAS | [readmes/README.GVM.md](readmes/README.GVM.md) |

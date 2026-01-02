@@ -25,18 +25,20 @@ PROJECT_ID = "first_test"
 #   - "port_scan"        : Fast port scanning (updates JSON)
 #   - "http_probe"       : HTTP probing and technology detection (updates JSON)
 #   - "vuln_scan"        : Web application vulnerability scanning (updates JSON)
+#   - "add_mitre"        : MITRE ATT&CK enrichment for CVEs (updates JSON)
 #   - "github"           : GitHub secret hunting (creates separate JSON)
 #
-# Pipeline: domain_discovery -> port_scan -> http_probe -> vuln_scan -> github
+# Pipeline: domain_discovery -> port_scan -> http_probe -> vuln_scan -> add_mitre -> github
 #
 # Examples:
-#   ["domain_discovery"]                                          - Only domain recon
-#   ["domain_discovery", "port_scan", "http_probe"]               - Recon + port/HTTP probing
-#   ["domain_discovery", "port_scan", "http_probe", "vuln_scan"]  - Full web scan (default)
-#   ["domain_discovery", "port_scan", "http_probe", "vuln_scan", "github"] - Complete scan
-#   ["port_scan", "http_probe", "vuln_scan"]                      - Update existing recon file
+#   ["domain_discovery"]                                                    - Only domain recon
+#   ["domain_discovery", "port_scan", "http_probe"]                         - Recon + port/HTTP probing
+#   ["domain_discovery", "port_scan", "http_probe", "vuln_scan"]            - Full web scan
+#   ["domain_discovery", "port_scan", "http_probe", "vuln_scan", "add_mitre"] - Full scan + MITRE (default)
+#   ["domain_discovery", "port_scan", "http_probe", "vuln_scan", "add_mitre", "github"] - Complete scan
+#   ["add_mitre"]                                                           - Only enrich existing recon file
 
-SCAN_MODULES = ["domain_discovery", "port_scan", "http_probe", "vuln_scan"]
+SCAN_MODULES = ["add_mitre"]
 
 # Hide your real IP during subdomain enumeration (uses Tor + proxychains)
 # Requires: Tor running (sudo systemctl start tor) + proxychains4 installed
@@ -444,6 +446,44 @@ CVE_LOOKUP_MIN_CVSS = 0.0
 VULNERS_API_KEY = ""
 
 
+# =============================================================================
+# MITRE CWE/CAPEC Enrichment Configuration
+# =============================================================================
+# Enriches CVE data with CWE weaknesses and CAPEC attack patterns
+# Uses the CVE2CAPEC database (github.com/Galeax/CVE2CAPEC)
+# Mapping chain: CVE → CWE → CAPEC (direct mappings only)
+#
+# Note: ATT&CK techniques and D3FEND defenses are NOT included because
+# CVE2CAPEC's mappings are inherited from generic parent CWEs (inaccurate).
+# Only direct CWE→CAPEC mappings from the most specific CWEs are used.
+
+# Auto-update MITRE database when running enrichment
+# If True, downloads latest CVE2CAPEC data before enrichment (respects TTL cache)
+# If False, uses existing cached database only
+MITRE_AUTO_UPDATE_DB = True
+
+# Include CWE (Common Weakness Enumeration) information
+# Shows the weakness type that enabled the vulnerability
+MITRE_INCLUDE_CWE = True
+
+# Include CAPEC (Common Attack Pattern Enumeration) information
+# Shows the attack patterns directly associated with the specific CWE
+MITRE_INCLUDE_CAPEC = True
+
+# Which scan outputs to enrich with MITRE data
+# Set to True to enrich recon output (vuln_scan.all_cves + technology_cves.all_cves)
+MITRE_ENRICH_RECON = True
+
+# Set to True to enrich GVM/OpenVAS output (scans[].unique_cves)
+MITRE_ENRICH_GVM = True
+
+# Local database cache settings
+# Path where CVE2CAPEC database will be cached
+MITRE_DATABASE_PATH = os.path.join(os.path.dirname(__file__), "recon", "data", "mitre_db")
+
+# How long to cache the database before checking for updates (hours)
+# CVE2CAPEC updates daily at 00:05 UTC
+MITRE_CACHE_TTL_HOURS = 24
 
 
 

@@ -1564,19 +1564,3 @@ def enrich_recon_file(recon_file: Path) -> dict:
     
     return enriched_data
 
-
-if __name__ == "__main__":
-    # Allow running standalone for testing
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="RedAmon Nuclei Scanner")
-    parser.add_argument("recon_file", help="Path to recon JSON file to enrich")
-    args = parser.parse_args()
-    
-    recon_path = Path(args.recon_file)
-    if not recon_path.exists():
-        print(f"[!] File not found: {recon_path}")
-        sys.exit(1)
-    
-    enrich_recon_file(recon_path)
-

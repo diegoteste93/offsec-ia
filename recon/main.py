@@ -41,6 +41,7 @@ from recon.github_secret_hunt import GitHubSecretHunter
 from recon.port_scan import run_port_scan
 from recon.http_probe import run_http_probe
 from recon.vuln_scan import run_vuln_scan
+from recon.add_mitre import run_mitre_enrichment
 
 # Output directory
 OUTPUT_DIR = Path(__file__).parent / "output"
@@ -84,6 +85,8 @@ def build_scan_type() -> str:
         modules.append("http_probe")
     if "vuln_scan" in SCAN_MODULES:
         modules.append("vuln_scan")
+    if "add_mitre" in SCAN_MODULES:
+        modules.append("add_mitre")
     if "github" in SCAN_MODULES:
         modules.append("github")
     return "_".join(modules) if modules else "custom"
@@ -247,6 +250,12 @@ def run_domain_recon(target: str, anonymous: bool = False, bruteforce: bool = Fa
         combined_result["metadata"]["modules_executed"].append("vuln_scan")
         save_recon_file(combined_result, output_file)
 
+    # Step 6: MITRE ATT&CK enrichment (adds ATT&CK techniques and D3FEND defenses to CVEs)
+    if "add_mitre" in SCAN_MODULES:
+        combined_result = run_mitre_enrichment(combined_result, output_file=output_file)
+        combined_result["metadata"]["modules_executed"].append("add_mitre")
+        save_recon_file(combined_result, output_file)
+
     # Print summary
     print(f"\n{'=' * 70}")
     print(f"[+] DOMAIN RECON COMPLETE")
@@ -271,7 +280,13 @@ def run_domain_recon(target: str, anonymous: bool = False, bruteforce: bool = Fa
         vuln_summary = combined_result["vuln_scan"].get("summary", {})
         vuln_total = combined_result["vuln_scan"].get("vulnerabilities", {}).get("total", 0)
         print(f"[+] Vuln findings: {vuln_summary.get('total_findings', 0)} ({vuln_total} vulnerabilities)")
-    
+
+    # MITRE enrichment stats
+    if "add_mitre" in SCAN_MODULES:
+        mitre_meta = combined_result.get("metadata", {}).get("mitre_enrichment", {})
+        if mitre_meta:
+            print(f"[+] MITRE enriched: {mitre_meta.get('total_cves_enriched', 0)}/{mitre_meta.get('total_cves_processed', 0)} CVEs")
+
     print(f"[+] Output saved: {output_file}")
     print(f"{'=' * 70}")
 
@@ -394,6 +409,15 @@ def main():
             with open(output_file, 'w') as f:
                 json.dump(domain_result, f, indent=2)
 
+        # Run add_mitre if in SCAN_MODULES (when domain_discovery is skipped)
+        if "add_mitre" in SCAN_MODULES:
+            domain_result = run_mitre_enrichment(domain_result, output_file=output_file)
+            if "metadata" in domain_result and "modules_executed" in domain_result["metadata"]:
+                if "add_mitre" not in domain_result["metadata"]["modules_executed"]:
+                    domain_result["metadata"]["modules_executed"].append("add_mitre")
+            with open(output_file, 'w') as f:
+                json.dump(domain_result, f, indent=2)
+
     # Phase 3: GitHub secret hunt - Separate JSON (if enabled)
     github_findings = []
     if "github" in SCAN_MODULES:
@@ -451,6 +475,19 @@ def main():
     elif "vuln_scan" not in SCAN_MODULES:
         print(f"║  Vuln scan: SKIPPED" + " " * 48 + "║")
 
+    # MITRE enrichment stats
+    if "add_mitre" in SCAN_MODULES:
+        mitre_meta = domain_result.get("metadata", {}).get("mitre_enrichment", {})
+        if mitre_meta:
+            enriched = mitre_meta.get('total_cves_enriched', 0)
+            total = mitre_meta.get('total_cves_processed', 0)
+            mitre_info = f"{enriched}/{total} CVEs enriched"
+            print(f"║  MITRE ATT&CK: {mitre_info}" + " " * (52 - len(mitre_info)) + "║")
+        else:
+            print(f"║  MITRE ATT&CK: No CVEs to enrich" + " " * 34 + "║")
+    elif "add_mitre" not in SCAN_MODULES:
+        print(f"║  MITRE ATT&CK: SKIPPED" + " " * 45 + "║")
+
     github_status = str(len(github_findings)) if "github" in SCAN_MODULES else "SKIPPED"
     print(f"║  GitHub findings: {github_status}" + " " * (49 - len(github_status)) + "║")
     print("╠" + "═" * 68 + "╣")
@@ -464,6 +501,8 @@ def main():
         suffixes.append("HTTPProbe")
     if "vuln_scan" in SCAN_MODULES:
         suffixes.append("VulnScan")
+    if "add_mitre" in SCAN_MODULES:
+        suffixes.append("MITRE")
     all_suffixes = " + " + " + ".join(suffixes) if suffixes else ""
     
     if is_subdomain_mode:
