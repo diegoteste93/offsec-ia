@@ -12,18 +12,24 @@ load_dotenv(Path(__file__).parent / ".env")
 # Target for RECON
 # TARGET_DOMAIN: Always specify the root domain (e.g., "vulnweb.com", "example.com")
 # SUBDOMAIN_LIST: Filter which subdomains to scan
-#   - Empty list []: Discover and scan ALL subdomains (full discovery mode)
+#   - Empty list []: Discover and scan ALL subdomains + root domain (full discovery mode)
 #   - Specific prefixes ["testphp.", "www."]: Only scan these specific subdomains (filtered mode)
+#   - Special prefix ".": Include the root domain directly (no subdomain prefix)
 #
 # Examples:
-#   TARGET_DOMAIN = "vulnweb.com", SUBDOMAIN_LIST = []           → Scan all subdomains of vulnweb.com
-#   TARGET_DOMAIN = "vulnweb.com", SUBDOMAIN_LIST = ["testphp."] → Only scan testphp.vulnweb.com
-#   TARGET_DOMAIN = "example.com", SUBDOMAIN_LIST = ["dev.", "staging."] → Only scan dev.example.com and staging.example.com
+#   TARGET_DOMAIN = "vulnweb.com", SUBDOMAIN_LIST = []              → Scan all subdomains + root domain
+#   TARGET_DOMAIN = "vulnweb.com", SUBDOMAIN_LIST = ["testphp."]    → Only scan testphp.vulnweb.com
+#   TARGET_DOMAIN = "vulnweb.com", SUBDOMAIN_LIST = ["testphp.","."]→ Scan testphp.vulnweb.com AND vulnweb.com
+#   TARGET_DOMAIN = "vulnweb.com", SUBDOMAIN_LIST = ["."]           → Only scan vulnweb.com (root only)
+#   TARGET_DOMAIN = "example.com", SUBDOMAIN_LIST = ["dev.", "staging.", "."] → Scan dev.example.com, staging.example.com, AND example.com
 #
-TARGET_DOMAIN = "vulnweb.com"
-SUBDOMAIN_LIST = ["testphp."]  # Empty = discover all, or specify prefixes like ["www.", "api."]
+# Note: When following HTTP redirects, only URLs within TARGET_DOMAIN scope are kept.
+#       Redirects to external domains are filtered out.
+#
+TARGET_DOMAIN = "beta80group.it"
+SUBDOMAIN_LIST = ["pmag."]  # Empty [] = discover all, "." = root domain, or prefixes like ["www.", "api.", "."]
 USER_ID = "samgiam"
-PROJECT_ID = "project_testphp.vulnweb.com_2"
+PROJECT_ID = "project_2"
 
 # =============================================================================
 # SCAN MODULES - Control which modules to run
@@ -54,7 +60,26 @@ UPDATE_GRAPH_DB = True
 # Hide your real IP during subdomain enumeration (uses Tor + proxychains)
 # Requires: Tor running (sudo systemctl start tor) + proxychains4 installed
 USE_TOR_FOR_RECON = False
-USE_BRUTEFORCE_FOR_SUBDOMAINS = False
+
+# Enable Knockpy bruteforce mode for subdomain discovery
+# Only applies when SUBDOMAIN_LIST = [] (full discovery mode)
+# Ignored when SUBDOMAIN_LIST has entries (filtered mode - no discovery needed)
+# Bruteforce is slower but can find hidden subdomains not in passive sources
+USE_BRUTEFORCE_FOR_SUBDOMAINS = True
+
+# =============================================================================
+# WHOIS Configuration
+# =============================================================================
+# Maximum retry attempts for WHOIS lookups (handles rate limiting and timeouts)
+# Uses exponential backoff: 1s, 2s, 4s delays between retries
+WHOIS_MAX_RETRIES = 6
+
+# =============================================================================
+# DNS Configuration
+# =============================================================================
+# Maximum retry attempts for DNS lookups (handles temporary failures and timeouts)
+# Uses exponential backoff: 1s, 2s, 4s delays between retries
+DNS_MAX_RETRIES = 3
 
 # =============================================================================
 # GitHub Secret Hunt Configuration
@@ -119,6 +144,7 @@ NAABU_SCAN_TYPE = "s"
 
 # Exclude CDN/WAF IPs (only scan ports 80,443 on CDN hosts)
 # Helps avoid false positives from CDN-protected sites
+# Note: Set to False for testing sites hosted on AWS/cloud providers
 NAABU_EXCLUDE_CDN = True
 
 # Display CDN information in output
@@ -371,7 +397,7 @@ KATANA_MAX_URLS = 500
 KATANA_RATE_LIMIT = 50
 
 # Timeout for the entire crawl (seconds)
-KATANA_TIMEOUT = 300  # 5 minutes
+KATANA_TIMEOUT = 900  # 15 minutes
 
 # Include URLs from JavaScript parsing
 KATANA_JS_CRAWL = True
@@ -561,6 +587,177 @@ KATANA_CUSTOM_HEADERS = [
     "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language: en-US,en;q=0.9",
 ]
+
+# =============================================================================
+# GAU (GetAllUrls) Passive URL Discovery Configuration
+# =============================================================================
+# Fetches historical URLs from Wayback Machine, Common Crawl, OTX, and URLScan
+# Runs in PARALLEL with Katana crawler for comprehensive URL discovery
+# GAU finds old/deleted endpoints, debug pages, backup files, admin panels
+# Docker image: sxcurity/gau:latest
+# Docs: https://github.com/lc/gau
+
+# Enable/disable GAU passive URL discovery
+GAU_ENABLED = False
+
+# Docker image for GAU
+GAU_DOCKER_IMAGE = "sxcurity/gau:latest"
+
+# Data sources to query
+# Options: "wayback", "commoncrawl", "otx", "urlscan"
+GAU_PROVIDERS = ["wayback", "commoncrawl", "otx", "urlscan"]
+
+# Maximum number of URLs to fetch per domain (0 = unlimited)
+GAU_MAX_URLS = 1000
+
+# Request timeout for each provider (seconds)
+GAU_TIMEOUT = 60
+
+# Number of parallel threads for fetching
+GAU_THREADS = 5
+
+# Blacklist file extensions (filter out static assets)
+# These URLs will be excluded from results
+GAU_BLACKLIST_EXTENSIONS = [
+    "png", "jpg", "jpeg", "gif", "svg", "ico", "webp", "avif",
+    "css", "woff", "woff2", "ttf", "eot", "otf",
+    "mp3", "mp4", "avi", "mov", "wmv", "flv", "webm",
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+    "zip", "rar", "7z", "tar", "gz"
+]
+
+# Year range for wayback machine (empty = all years)
+# Format: ["YYYY", "YYYY"] e.g., ["2020", "2024"]
+GAU_YEAR_RANGE = []
+
+# Enable verbose output
+GAU_VERBOSE = False
+
+# =============================================================================
+# GAU URL Verification Configuration
+# =============================================================================
+# Verify discovered URLs are live before adding to resource_enum
+
+# Enable URL verification (HTTP HEAD/GET check)
+GAU_VERIFY_URLS = True
+
+# Use httpx Docker container for verification (matches http_probe)
+GAU_VERIFY_DOCKER_IMAGE = "projectdiscovery/httpx:latest"
+
+# Verification timeout per URL (seconds)
+GAU_VERIFY_TIMEOUT = 5
+
+# Verification rate limit (requests per second)
+GAU_VERIFY_RATE_LIMIT = 100
+
+# Verification threads
+GAU_VERIFY_THREADS = 50
+
+# Accept URLs with these status codes as "live"
+GAU_VERIFY_ACCEPT_STATUS = [200, 201, 301, 302, 307, 308, 401, 403]
+
+# -----------------------------------------------------------------------------
+# Method Detection (OPTIONS probe)
+# -----------------------------------------------------------------------------
+# Enable OPTIONS probe to detect allowed HTTP methods for GAU endpoints
+# Queries OPTIONS method and parses 'Allow' header to find GET, POST, PUT, DELETE, etc.
+GAU_DETECT_METHODS = True
+
+# Timeout for OPTIONS probe per URL (seconds)
+GAU_METHOD_DETECT_TIMEOUT = 5
+
+# Rate limit for method detection (requests per second)
+GAU_METHOD_DETECT_RATE_LIMIT = 50
+
+# Threads for method detection
+GAU_METHOD_DETECT_THREADS = 25
+
+# Filter out endpoints that don't respond to any method
+# If True, endpoints returning 404/500/timeout on all methods are excluded from results
+GAU_FILTER_DEAD_ENDPOINTS = True
+
+# =============================================================================
+# Kiterunner API Endpoint Discovery Configuration
+# =============================================================================
+# Bruteforces API routes using Swagger/OpenAPI specifications
+# Discovers hidden APIs that aren't linked or archived
+# Runs in PARALLEL with Katana and GAU for comprehensive endpoint discovery
+# Binary: Auto-downloaded from GitHub releases to ~/.redamon/tools/kiterunner/
+# Docs: https://github.com/assetnote/kiterunner
+
+# Enable/disable Kiterunner API discovery
+KITERUNNER_ENABLED = True
+
+# Wordlist to use (run `kr wordlist list` to see all available):
+# IMPORTANT: Choose wordlist based on target technology:
+# - "apiroutes-251227" - REST APIs (Node.js, Python, Go, etc.)
+# - "php-251227"       - PHP applications (WordPress, Laravel, etc.)
+# - "aspx-251227"      - ASP.NET applications
+# - "jsp-251227"       - Java JSP applications
+# - "cgi-251227"       - CGI/Perl scripts
+# - "directories-251227" - Directory discovery (generic)
+# - Custom path: "/path/to/wordlist.kite"
+#
+# NOTE: Using wrong wordlist = 0 results! API wordlist won't find PHP files.
+KITERUNNER_WORDLIST = "apiroutes-251227"
+
+# Request rate limit (requests per second)
+# Lower values are stealthier but slower
+KITERUNNER_RATE_LIMIT = 100
+
+# Concurrent connections per target
+KITERUNNER_CONNECTIONS = 100
+
+# Request timeout per endpoint (seconds)
+KITERUNNER_TIMEOUT = 10
+
+# Overall scan timeout (seconds)
+# Note: Large wordlists need more time. php-251227 has 177k routes.
+KITERUNNER_SCAN_TIMEOUT = 1000
+
+# Threads for scanning
+KITERUNNER_THREADS = 50
+
+# Ignore these response status codes (filter out noise)
+KITERUNNER_IGNORE_STATUS = [404, 400, 502, 503]
+
+# Content-Length filter (ignore responses smaller than this in bytes)
+# Useful for filtering empty/tiny error responses
+KITERUNNER_MIN_CONTENT_LENGTH = 0
+
+# Only show results with these status codes (empty = all except ignored)
+KITERUNNER_MATCH_STATUS = []
+
+# Custom headers for authenticated scanning
+# Example: ["Authorization: Bearer token123", "X-API-Key: key123"]
+KITERUNNER_HEADERS = []
+
+# -----------------------------------------------------------------------------
+# Kiterunner Method Detection Configuration
+# -----------------------------------------------------------------------------
+# Kiterunner's wordlist only contains GET routes. These settings allow
+# discovering additional HTTP methods (POST, PUT, DELETE) on found endpoints.
+
+# Enable method detection for Kiterunner-discovered endpoints
+KITERUNNER_DETECT_METHODS = True
+
+# Method detection strategy:
+# - "options": Send OPTIONS request, parse 'Allow' header (faster, fewer requests)
+# - "bruteforce": Try each method directly to see if it responds (slower, more accurate)
+KITERUNNER_METHOD_DETECTION_MODE = "bruteforce"
+
+# Methods to try in "bruteforce" mode (ignored in "options" mode)
+# These will be tried on each discovered endpoint
+KITERUNNER_BRUTEFORCE_METHODS = ["POST", "PUT", "DELETE", "PATCH"]
+
+# Timeout for method detection requests (seconds)
+KITERUNNER_METHOD_DETECT_TIMEOUT = 5
+
+# Rate limit for method detection (requests per second)
+KITERUNNER_METHOD_DETECT_RATE_LIMIT = 50
+
+# Threads for method detection
+KITERUNNER_METHOD_DETECT_THREADS = 25
 
 # =============================================================================
 

@@ -10,6 +10,7 @@ import requests
 import re
 import glob
 import json
+import time
 import dns.resolver
 from pathlib import Path
 from datetime import datetime
@@ -18,6 +19,8 @@ import sys
 # Add project root to path for imports
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from params import DNS_MAX_RETRIES
 
 OUTPUT_DIR = Path(__file__).parent / "output"
 DNS_RECORD_TYPES = ['A', 'AAAA', 'MX', 'NS', 'TXT', 'SOA', 'CNAME']
@@ -132,27 +135,68 @@ def run_knockpy(domain: str, proxychains_prefix: list, bruteforce: bool = False)
     return subdomains
 
 
-def dns_lookup(hostname: str) -> dict:
+def dns_lookup_single(hostname: str, rtype: str, max_retries: int = None) -> list:
     """
-    Perform full DNS lookup for all record types.
+    Perform DNS lookup for a single record type with retry logic.
     
     Args:
         hostname: Domain or subdomain to resolve
+        rtype: DNS record type (A, AAAA, MX, etc.)
+        max_retries: Maximum retry attempts (defaults to DNS_MAX_RETRIES)
+        
+    Returns:
+        List of DNS records or None if not found/failed
+    """
+    if max_retries is None:
+        max_retries = DNS_MAX_RETRIES
+    
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            answers = dns.resolver.resolve(hostname, rtype)
+            return [rr.to_text() for rr in answers]
+        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+            # These are expected "not found" responses - no retry needed
+            return None
+        except (dns.resolver.NoNameservers, dns.resolver.Timeout) as e:
+            # Temporary failures - worth retrying
+            last_error = e
+            if attempt < max_retries - 1:
+                delay = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                time.sleep(delay)
+                continue
+            return None
+        except Exception as e:
+            # Unexpected errors - retry
+            last_error = e
+            if attempt < max_retries - 1:
+                delay = 2 ** attempt
+                time.sleep(delay)
+                continue
+            return None
+    
+    return None
+
+
+def dns_lookup(hostname: str, max_retries: int = None) -> dict:
+    """
+    Perform full DNS lookup for all record types with retry logic.
+    
+    Args:
+        hostname: Domain or subdomain to resolve
+        max_retries: Maximum retry attempts per record type (defaults to DNS_MAX_RETRIES)
         
     Returns:
         Dictionary with all DNS records
     """
+    if max_retries is None:
+        max_retries = DNS_MAX_RETRIES
+    
     dns_data = {}
     
     for rtype in DNS_RECORD_TYPES:
-        try:
-            answers = dns.resolver.resolve(hostname, rtype)
-            dns_data[rtype] = [rr.to_text() for rr in answers]
-        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, 
-                dns.resolver.NoNameservers, dns.resolver.Timeout):
-            dns_data[rtype] = None
-        except Exception:
-            dns_data[rtype] = None
+        dns_data[rtype] = dns_lookup_single(hostname, rtype, max_retries)
     
     # Extract IPs for convenience
     ips = {

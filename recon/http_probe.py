@@ -658,9 +658,17 @@ def build_httpx_command(targets_file: str, output_file: str, use_proxy: bool = F
 # Result Parsing
 # =============================================================================
 
-def parse_httpx_output(output_file: str) -> Dict:
+def parse_httpx_output(output_file: str, root_domain: str = None, allowed_hosts: list = None) -> Dict:
     """
     Parse httpx JSON Lines output into structured format.
+    
+    Args:
+        output_file: Path to httpx JSON Lines output file
+        root_domain: Target root domain for filtering redirects (e.g., "vulnweb.com")
+                    If provided, URLs that redirect outside this domain are excluded.
+        allowed_hosts: List of specific allowed hostnames (from filtered mode).
+                      If provided, only URLs matching these exact hosts are included.
+                      If None (full discovery mode), any host within root_domain is allowed.
 
     Returns:
         Structured dictionary with by_url, by_host, technologies_found, and summary
@@ -670,6 +678,7 @@ def parse_httpx_output(output_file: str) -> Dict:
     technologies_found = {}
     servers_found = {}
     status_codes = {}
+    filtered_count = 0  # Track URLs filtered out due to domain/host mismatch
 
     if not Path(output_file).exists():
         return {
@@ -696,6 +705,13 @@ def parse_httpx_output(output_file: str) -> Dict:
 
             # Extract host from URL
             host = extract_host_from_url(url)
+            
+            # Filter URLs outside target scope
+            # In filtered mode: only allow specific hosts from SUBDOMAIN_LIST
+            # In full discovery mode: allow any host within root_domain scope
+            if root_domain and not is_host_in_scope(host, root_domain, allowed_hosts):
+                filtered_count += 1
+                continue
 
             # Status code tracking
             status_code = entry.get("status_code") or entry.get("status-code")
@@ -821,7 +837,8 @@ def parse_httpx_output(output_file: str) -> Dict:
         "server_count": len(servers_found),
         "cdn_hosts": len([h for h in by_host.values() if any(
             by_url.get(u, {}).get("is_cdn") for u in h.get("urls", [])
-        )])
+        )]),
+        "filtered_out_of_scope": filtered_count  # URLs filtered due to redirect outside target domain
     }
 
     return {
@@ -845,6 +862,42 @@ def extract_host_from_url(url: str) -> str:
         return host
     except Exception:
         return ""
+
+
+def is_host_in_scope(host: str, root_domain: str, allowed_hosts: list = None) -> bool:
+    """
+    Check if a hostname is within the target scope.
+    
+    If allowed_hosts is provided (filtered mode), only those specific hosts are allowed.
+    If allowed_hosts is None/empty (full discovery mode), any subdomain of root_domain is allowed.
+    
+    Args:
+        host: The hostname to check
+        root_domain: The target root domain
+        allowed_hosts: List of specific allowed hostnames (from SUBDOMAIN_LIST filter).
+                      If None or empty, allows any host within root_domain scope.
+        
+    Returns:
+        True if host is in scope, False otherwise
+    """
+    if not host or not root_domain:
+        return False
+    
+    host = host.lower().strip()
+    root_domain = root_domain.lower().strip()
+    
+    # First, check if host is even within the root domain scope
+    in_root_scope = (host == root_domain or host.endswith(f".{root_domain}"))
+    if not in_root_scope:
+        return False
+    
+    # If allowed_hosts is specified (filtered mode), check against that list
+    if allowed_hosts:
+        allowed_set = {h.lower().strip() for h in allowed_hosts}
+        return host in allowed_set
+    
+    # Full discovery mode - allow any host within root domain scope
+    return True
 
 
 def is_ip(value: str) -> bool:
@@ -1321,9 +1374,28 @@ def run_http_probe(recon_data: dict, output_file: Path = None) -> dict:
             print(f"    [!] Probe failed: {stderr[:200] if stderr else 'Unknown error'}")
             return recon_data
 
-        # Parse results
+        # Parse results (filter URLs outside target scope)
         print(f"\n[*] Parsing results...")
-        results = parse_httpx_output(str(httpx_output))
+        root_domain = recon_data.get("domain", "") or recon_data.get("metadata", {}).get("root_domain", "")
+        
+        # Get allowed hosts for filtering (from SUBDOMAIN_LIST filter)
+        # In filtered mode: subdomain_filter contains the explicit list of allowed hosts
+        # In full discovery mode (subdomain_filter empty): allow any host in root_domain scope
+        metadata = recon_data.get("metadata", {})
+        filtered_mode = metadata.get("filtered_mode", False)
+        allowed_hosts = None
+        if filtered_mode:
+            # Use the subdomain_filter which contains the full subdomain names
+            allowed_hosts = metadata.get("subdomain_filter", [])
+            if allowed_hosts:
+                print(f"    [*] Filtering to allowed hosts: {', '.join(allowed_hosts)}")
+        
+        results = parse_httpx_output(str(httpx_output), root_domain=root_domain, allowed_hosts=allowed_hosts)
+        
+        # Log if any URLs were filtered out
+        filtered_count = results.get("summary", {}).get("filtered_out_of_scope", 0)
+        if filtered_count > 0:
+            print(f"    [*] Filtered {filtered_count} URL(s) outside target scope")
 
         # Build final structure
         httpx_results = {
@@ -1339,7 +1411,10 @@ def run_http_probe(recon_data: dict, output_file: Path = None) -> dict:
                 "tls_probing": HTTPX_PROBE_TLS_INFO,
                 "response_included": HTTPX_INCLUDE_RESPONSE,
                 "proxy_used": use_proxy,
-                "total_urls_probed": len(urls)
+                "total_urls_probed": len(urls),
+                "root_domain_filter": root_domain,
+                "filtered_mode": filtered_mode,
+                "allowed_hosts_filter": allowed_hosts  # Specific hosts allowed (None = all in scope)
             },
             "by_url": results["by_url"],
             "by_host": results["by_host"],

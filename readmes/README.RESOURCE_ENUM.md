@@ -14,19 +14,21 @@
 2. [Features](#features)
 3. [Installation](#installation)
 4. [Configuration Parameters](#configuration-parameters)
-5. [Architecture & Flow](#architecture--flow)
-6. [Output Data Structure](#output-data-structure)
-7. [Endpoint Classification](#endpoint-classification)
-8. [Parameter Classification](#parameter-classification)
-9. [Form Parsing](#form-parsing)
-10. [Usage Examples](#usage-examples)
-11. [Troubleshooting](#troubleshooting)
+5. [GAU Configuration](#gau-configuration)
+6. [Kiterunner Configuration](#kiterunner-configuration)
+7. [Architecture & Flow](#architecture--flow)
+8. [Output Data Structure](#output-data-structure)
+9. [Endpoint Classification](#endpoint-classification)
+10. [Parameter Classification](#parameter-classification)
+11. [Form Parsing](#form-parsing)
+12. [Usage Examples](#usage-examples)
+13. [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Overview
 
-The `resource_enum.py` module provides comprehensive endpoint discovery and classification for web applications. It crawls target URLs to discover all accessible endpoints, extracts parameters, parses HTML forms, and organizes everything into a structured format ready for vulnerability scanning.
+The `resource_enum.py` module provides comprehensive endpoint discovery and classification for web applications. It combines **active crawling** (Katana), **passive historical URL discovery** (GAU), and **API bruteforcing** (Kiterunner) to maximize endpoint coverage, extracts parameters, parses HTML forms, and organizes everything into a structured format ready for vulnerability scanning.
 
 **Pipeline Position:** `http_probe -> resource_enum -> vuln_scan`
 
@@ -34,7 +36,9 @@ The `resource_enum.py` module provides comprehensive endpoint discovery and clas
 
 | Feature | Without resource_enum | With resource_enum |
 |---------|----------------------|-------------------|
-| Endpoint Discovery | Manual or basic | **Automated crawling** |
+| Endpoint Discovery | Manual or basic | **Automated crawling + passive + API bruteforce** |
+| Historical URLs | Missed | **GAU finds old/deleted endpoints** |
+| Hidden APIs | Missed | **Kiterunner finds undocumented APIs** |
 | POST Endpoints | Missed | **Form parsing** |
 | Parameter Extraction | None | **Full extraction** |
 | Endpoint Classification | None | **Categorized** |
@@ -44,15 +48,27 @@ The `resource_enum.py` module provides comprehensive endpoint discovery and clas
 ### How It Works
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  http_probe     │────▶│  resource_enum   │────▶│  vuln_scan      │
-│  (live URLs,    │     │                  │     │  (targeted      │
-│   responses)    │     │  1. Katana crawl │     │   scanning)     │
-└─────────────────┘     │  2. Form parsing │     └─────────────────┘
-                        │  3. Param extract│
-                        │  4. Classify     │
-                        │  5. Organize     │
-                        └──────────────────┘
+┌─────────────────┐     ┌────────────────────────────────────────────────┐     ┌─────────────────┐
+│  http_probe     │────▶│              resource_enum                      │────▶│  vuln_scan      │
+│  (live URLs,    │     │                                                │     │  (targeted      │
+│   responses)    │     │  ┌────────────┐ ┌────────────┐ ┌─────────────┐ │     │   scanning)     │
+└─────────────────┘     │  │  Katana    │ │    GAU     │ │ Kiterunner  │ │     └─────────────────┘
+                        │  │  (active)  │ │  (passive) │ │ (API brute) │ │
+                        │  │            │ │            │ │             │ │
+                        │  │ Crawl site │ │ Query:     │ │ Bruteforce: │ │
+                        │  │ Parse JS   │ │ - Wayback  │ │ - 40k+ APIs │ │
+                        │  │ Find forms │ │ - CommonCrl│ │ - Swagger   │ │
+                        │  └─────┬──────┘ │ - OTX      │ │ - OpenAPI   │ │
+                        │        │        │ - URLScan  │ └──────┬──────┘ │
+                        │        │        └─────┬──────┘        │        │
+                        │        └───────────┬──┴───────────────┘        │
+                        │                    ▼                           │
+                        │  ┌──────────────────────────────────────────┐  │
+                        │  │  Merge & Deduplicate                     │  │
+                        │  │  + Source tracking (sources array)       │  │
+                        │  │  + Endpoint Classification               │  │
+                        │  └──────────────────────────────────────────┘  │
+                        └────────────────────────────────────────────────┘
 ```
 
 ---
@@ -61,13 +77,20 @@ The `resource_enum.py` module provides comprehensive endpoint discovery and clas
 
 | Feature | Description |
 |---------|-------------|
-| **Katana Crawling** | Deep endpoint discovery using ProjectDiscovery's Katana |
+| **Katana Crawling** | Deep endpoint discovery using ProjectDiscovery's Katana (active) |
+| **GAU Discovery** | Historical URL discovery from Wayback, CommonCrawl, OTX, URLScan (passive) |
+| **Kiterunner API Bruteforce** | Hidden API discovery using 40k+ Swagger/OpenAPI specifications |
+| **Parallel Execution** | Katana, GAU, and Kiterunner run simultaneously for faster results |
+| **URL Verification** | Verifies GAU URLs are live before adding to results |
+| **Method Detection** | OPTIONS probe detects allowed HTTP methods (GET, POST, PUT, DELETE) |
+| **Dead Endpoint Filtering** | Filters out endpoints that don't respond (404, 500, timeout) |
 | **JavaScript Parsing** | Discovers endpoints in JavaScript files |
 | **Form Extraction** | Parses HTML forms for POST endpoints |
 | **Parameter Extraction** | Extracts query and body parameters |
 | **Type Inference** | Infers parameter data types (integer, email, URL, etc.) |
 | **Endpoint Classification** | Categorizes endpoints (auth, api, admin, file_access, etc.) |
 | **Parameter Classification** | Identifies sensitive params (id, file, auth, redirect, command) |
+| **Source Tracking** | Each endpoint tracked with `sources` array: `["katana", "gau", "kiterunner"]` |
 | **Docker Execution** | Runs via Docker for consistency |
 | **Tor Support** | Anonymous crawling via SOCKS proxy |
 | **Incremental Output** | Saves results as crawling progresses |
@@ -97,8 +120,11 @@ python3 recon/main.py
 # Check Docker is running
 docker info
 
-# Optionally pre-pull the Katana image
+# Optionally pre-pull the images
 docker pull projectdiscovery/katana:latest
+docker pull sxcurity/gau:latest
+# Kiterunner binary is auto-downloaded from GitHub releases (no Docker needed)
+docker pull projectdiscovery/httpx:latest  # For URL verification
 ```
 
 ---
@@ -215,6 +241,243 @@ KATANA_PARAMS_ONLY = False
 
 ---
 
+## GAU Configuration
+
+GAU (GetAllUrls) provides passive URL discovery from historical archives. It runs in parallel with Katana.
+
+### 1. Core GAU Settings
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `GAU_ENABLED` | `bool` | `True` | Enable/disable GAU discovery |
+| `GAU_DOCKER_IMAGE` | `str` | `"sxcurity/gau:latest"` | Docker image to use |
+| `GAU_PROVIDERS` | `list` | `["wayback", "commoncrawl", "otx", "urlscan"]` | Data sources to query |
+| `GAU_MAX_URLS` | `int` | `1000` | Maximum URLs per domain (0 = unlimited) |
+| `GAU_TIMEOUT` | `int` | `60` | Timeout per provider in seconds |
+| `GAU_THREADS` | `int` | `5` | Parallel threads for fetching |
+
+### 2. GAU Data Sources
+
+| Provider | Description | URL Type |
+|----------|-------------|----------|
+| **wayback** | Wayback Machine (web.archive.org) | Historical snapshots |
+| **commoncrawl** | Common Crawl (index.commoncrawl.org) | Web crawl data |
+| **otx** | AlienVault OTX | Threat intelligence |
+| **urlscan** | URLScan.io | Security scan results |
+
+### 3. Filtering Options
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `GAU_BLACKLIST_EXTENSIONS` | `list` | See below | File extensions to exclude |
+| `GAU_YEAR_RANGE` | `list` | `[]` | Filter by year range, e.g., `["2020", "2024"]` |
+
+**Default Blacklisted Extensions:**
+```python
+GAU_BLACKLIST_EXTENSIONS = [
+    "png", "jpg", "jpeg", "gif", "svg", "ico", "webp", "avif",
+    "css", "woff", "woff2", "ttf", "eot", "otf",
+    "mp3", "mp4", "avi", "mov", "wmv", "flv", "webm",
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+    "zip", "rar", "7z", "tar", "gz"
+]
+```
+
+### 4. URL Verification
+
+GAU URLs are verified to check if they're still live before adding to results.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `GAU_VERIFY_URLS` | `bool` | `True` | Enable HTTP verification |
+| `GAU_VERIFY_DOCKER_IMAGE` | `str` | `"projectdiscovery/httpx:latest"` | httpx image for verification |
+| `GAU_VERIFY_TIMEOUT` | `int` | `5` | Timeout per URL in seconds |
+| `GAU_VERIFY_RATE_LIMIT` | `int` | `100` | Requests per second |
+| `GAU_VERIFY_THREADS` | `int` | `50` | Concurrent verification threads |
+| `GAU_VERIFY_ACCEPT_STATUS` | `list` | `[200, 201, 301, 302, 307, 308, 401, 403]` | HTTP status codes to accept |
+
+### 5. HTTP Method Detection (OPTIONS Probe)
+
+GAU doesn't know which HTTP methods an endpoint supports. This feature uses the OPTIONS HTTP method to detect allowed methods from the server's `Allow` header.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `GAU_DETECT_METHODS` | `bool` | `True` | Enable OPTIONS probe for method detection |
+| `GAU_METHOD_DETECT_TIMEOUT` | `int` | `5` | Timeout per URL in seconds |
+| `GAU_METHOD_DETECT_RATE_LIMIT` | `int` | `50` | Requests per second |
+| `GAU_METHOD_DETECT_THREADS` | `int` | `25` | Concurrent threads |
+| `GAU_FILTER_DEAD_ENDPOINTS` | `bool` | `True` | Filter out endpoints that don't respond |
+
+**How It Works:**
+
+1. Send OPTIONS request to each verified GAU URL
+2. Parse `Allow` header from response (e.g., `Allow: GET, POST, PUT, DELETE`)
+3. If no Allow header, fall back to GET check
+4. Filter out dead endpoints (404, 500, timeout)
+5. Store detected methods in endpoint data
+
+**Example Output:**
+
+```json
+{
+  "/api/users": {
+    "methods": ["GET", "POST", "PUT", "DELETE"],
+    "source": "gau"
+  },
+  "/login": {
+    "methods": ["GET", "POST"],
+    "source": "gau"
+  }
+}
+```
+
+**Why This Matters:**
+- Katana can detect methods from form parsing (e.g., `<form method="POST">`)
+- GAU only returns URLs - no method info
+- OPTIONS probe discovers POST/PUT/DELETE endpoints that would otherwise be missed
+- Dead endpoints (404/500) are filtered out to reduce noise
+
+### 6. GAU Configuration Profiles
+
+#### Minimal (Fast)
+```python
+GAU_ENABLED = True
+GAU_PROVIDERS = ["wayback"]  # Single source
+GAU_MAX_URLS = 500
+GAU_VERIFY_URLS = False  # Skip verification
+GAU_DETECT_METHODS = False  # Skip method detection
+```
+**Expected:** ~10-20 seconds per domain
+
+#### Balanced (Default)
+```python
+GAU_ENABLED = True
+GAU_PROVIDERS = ["wayback", "commoncrawl", "otx", "urlscan"]
+GAU_MAX_URLS = 1000
+GAU_VERIFY_URLS = True
+GAU_DETECT_METHODS = True
+GAU_FILTER_DEAD_ENDPOINTS = True
+```
+**Expected:** ~30-60 seconds per domain
+
+#### Comprehensive
+```python
+GAU_ENABLED = True
+GAU_PROVIDERS = ["wayback", "commoncrawl", "otx", "urlscan"]
+GAU_MAX_URLS = 5000
+GAU_YEAR_RANGE = []  # All years
+GAU_VERIFY_URLS = True
+GAU_DETECT_METHODS = True
+GAU_FILTER_DEAD_ENDPOINTS = True
+```
+**Expected:** ~2-5 minutes per domain
+
+### 7. What GAU Finds
+
+| Category | Examples | Why It Matters |
+|----------|----------|----------------|
+| **Old Admin Panels** | `/admin/`, `/wp-admin/`, `/administrator/` | May still be accessible |
+| **Debug Endpoints** | `/phpinfo.php`, `/debug/`, `/test/` | Information disclosure |
+| **Backup Files** | `/backup.sql`, `/db_dump.sql`, `/config.bak` | Sensitive data |
+| **Old API Versions** | `/api/v1/`, `/api/beta/` | May have unpatched vulns |
+| **Hidden Parameters** | `?debug=1`, `?admin=true` | Bypass security |
+| **Forgotten Uploads** | `/uploads/temp/`, `/files/old/` | Sensitive files |
+
+---
+
+## Kiterunner Configuration
+
+Kiterunner provides API endpoint bruteforcing using real Swagger/OpenAPI specifications. It runs in parallel with Katana and GAU.
+
+### 1. Core Kiterunner Settings
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `KITERUNNER_ENABLED` | `bool` | `True` | Enable/disable Kiterunner discovery |
+| (Binary auto-download) | - | `~/.redamon/tools/kiterunner/kr` | Auto-downloaded from GitHub releases |
+| `KITERUNNER_WORDLIST` | `str` | `"apiroutes-251227"` | Wordlist (354k+ API routes) |
+| `KITERUNNER_RATE_LIMIT` | `int` | `100` | Requests per second |
+| `KITERUNNER_CONNECTIONS` | `int` | `100` | Concurrent connections |
+| `KITERUNNER_TIMEOUT` | `int` | `10` | Request timeout per endpoint (seconds) |
+| `KITERUNNER_SCAN_TIMEOUT` | `int` | `300` | Overall scan timeout (seconds) |
+| `KITERUNNER_THREADS` | `int` | `50` | Scanning threads |
+
+### 2. Kiterunner Wordlists
+
+Run `kr wordlist list` to see all available wordlists.
+
+| Wordlist | Description | Routes |
+|----------|-------------|--------|
+| `apiroutes-251227` | Comprehensive API routes (default) | 354,000+ |
+| `aspx-251227` | ASP.NET specific routes | ~82,000 |
+| `jsp-251227` | JSP/Java specific routes | ~21,000 |
+| `php-251227` | PHP specific routes | ~178,000 |
+| `directories-251227` | Directory discovery | ~703,000 |
+| Custom path | Your own wordlist | Variable |
+
+### 3. Filtering Options
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `KITERUNNER_IGNORE_STATUS` | `list` | `[404, 400, 502, 503]` | Status codes to ignore |
+| `KITERUNNER_MATCH_STATUS` | `list` | `[]` | Only match these status codes (empty = all) |
+| `KITERUNNER_MIN_CONTENT_LENGTH` | `int` | `0` | Ignore responses smaller than this |
+| `KITERUNNER_HEADERS` | `list` | `[]` | Custom headers for authenticated scanning |
+
+### 4. Kiterunner Configuration Profiles
+
+#### Minimal (Fast)
+```python
+KITERUNNER_ENABLED = True
+KITERUNNER_WORDLIST = "apiroutes-251227"
+KITERUNNER_RATE_LIMIT = 200
+KITERUNNER_SCAN_TIMEOUT = 120
+```
+**Expected:** ~1-2 minutes per target
+
+#### Balanced (Default)
+```python
+KITERUNNER_ENABLED = True
+KITERUNNER_WORDLIST = "apiroutes-251227"
+KITERUNNER_RATE_LIMIT = 100
+KITERUNNER_CONNECTIONS = 100
+KITERUNNER_SCAN_TIMEOUT = 300
+```
+**Expected:** ~3-5 minutes per target
+
+#### Comprehensive (Stealth)
+```python
+KITERUNNER_ENABLED = True
+KITERUNNER_WORDLIST = "apiroutes-251227"
+KITERUNNER_RATE_LIMIT = 50
+KITERUNNER_CONNECTIONS = 50
+KITERUNNER_SCAN_TIMEOUT = 600
+```
+**Expected:** ~5-10 minutes per target
+
+### 5. What Kiterunner Finds
+
+| Category | Examples | Why It Matters |
+|----------|----------|----------------|
+| **Hidden REST APIs** | `/api/v1/users`, `/api/admin/config` | Undocumented functionality |
+| **GraphQL Endpoints** | `/graphql`, `/gql`, `/api/graphql` | Complex query surface |
+| **Internal APIs** | `/internal/`, `/private/`, `/debug/` | Bypass access controls |
+| **Version Endpoints** | `/version`, `/health`, `/status` | Information disclosure |
+| **CRUD Operations** | `/users/create`, `/posts/delete` | Data manipulation |
+| **Swagger/OpenAPI** | `/swagger.json`, `/api-docs` | API documentation exposure |
+
+### 6. Why Kiterunner Over Traditional Wordlists?
+
+| Feature | Traditional Wordlists | Kiterunner |
+|---------|----------------------|------------|
+| Route coverage | Limited to common paths | 40k+ real API routes |
+| HTTP Methods | Usually GET only | Correct method per route |
+| Parameters | None | Swagger-defined params |
+| Headers | None | API-specific headers |
+| False positives | Many 404s | Validated responses |
+
+---
+
 ## Architecture & Flow
 
 ### Execution Flow
@@ -222,35 +485,66 @@ KATANA_PARAMS_ONLY = False
 ```
 1. INITIALIZATION
    └── Check Docker availability
-   └── Pull Katana image if needed
+   └── Pull Katana + GAU + Kiterunner images in parallel
    └── Check Tor availability (if enabled)
 
 2. TARGET EXTRACTION
    └── Get live URLs from http_probe
+   └── Extract domains for GAU
    └── Filter by status code (< 500)
    └── Fallback to DNS data if no http_probe
 
-3. KATANA CRAWLING
-   └── Build Docker command with options
-   └── Run Katana for each target
-   └── Collect discovered URLs
-   └── Apply exclude patterns
+3. PARALLEL DISCOVERY (Katana + GAU + Kiterunner)
+   ┌──────────────────────────────────────────────────────────────┐
+   │  ThreadPoolExecutor (max_workers=3)                          │
+   │                                                              │
+   │  ┌─────────────┐  ┌─────────────┐  ┌────────────────────┐   │
+   │  │   KATANA    │  │     GAU     │  │    KITERUNNER      │   │
+   │  │   (active)  │  │  (passive)  │  │    (API brute)     │   │
+   │  │             │  │             │  │                    │   │
+   │  │ - Crawl     │  │ - Wayback   │  │ - Swagger specs    │   │
+   │  │ - Parse JS  │  │ - CommonCrl │  │ - 40k+ API routes  │   │
+   │  │ - Find URLs │  │ - OTX       │  │ - Method detection │   │
+   │  │             │  │ - URLScan   │  │                    │   │
+   │  └──────┬──────┘  └──────┬──────┘  └─────────┬──────────┘   │
+   │         │                │                   │               │
+   └─────────┴────────────────┴───────────────────┴───────────────┘
+                              │
+                              ▼
+4. GAU URL VERIFICATION (if enabled)
+   └── Write GAU URLs to temp file
+   └── Run httpx Docker for verification
+   └── Filter to live URLs only
 
-4. FORM PARSING
+5. METHOD DETECTION (if enabled)
+   └── Send OPTIONS request to each verified URL
+   └── Parse 'Allow' header for supported methods
+   └── Fall back to GET check if OPTIONS fails
+   └── Filter out dead endpoints (404/500/timeout)
+
+6. MERGE & DEDUPLICATE
+   └── Mark Katana endpoints with sources=['katana']
+   └── Merge GAU URLs, add 'gau' to sources array
+   └── Merge Kiterunner APIs, add 'kiterunner' to sources array
+   └── Apply detected methods to endpoints
+   └── Track overlap statistics for each tool
+
+7. FORM PARSING
    └── Extract HTML from http_probe responses
    └── Parse <form> elements
    └── Extract action URLs and methods
    └── Extract input fields
 
-5. ENDPOINT ORGANIZATION
+8. ENDPOINT ORGANIZATION
    └── Group by base URL
    └── Parse query parameters
    └── Merge form data
    └── Classify endpoints
    └── Classify parameters
 
-6. OUTPUT GENERATION
+9. OUTPUT GENERATION
    └── Build structured JSON
+   └── Include GAU + Kiterunner stats
    └── Generate summary statistics
    └── Save to recon file
 ```
@@ -304,21 +598,56 @@ KATANA_PARAMS_ONLY = False
     "scan_metadata": {
       "scan_timestamp": "2024-01-15T12:00:00.000000",
       "scan_duration_seconds": 145.5,
-      "docker_image": "projectdiscovery/katana:latest",
-      "crawl_depth": 3,
-      "max_urls": 1000,
-      "rate_limit": 150,
-      "js_crawl": true,
-      "params_only": false,
+
+      "katana_docker_image": "projectdiscovery/katana:latest",
+      "katana_crawl_depth": 3,
+      "katana_max_urls": 1000,
+      "katana_rate_limit": 150,
+      "katana_js_crawl": true,
+      "katana_params_only": false,
+      "katana_urls_found": 234,
+
+      "gau_enabled": true,
+      "gau_docker_image": "sxcurity/gau:latest",
+      "gau_providers": ["wayback", "commoncrawl", "otx", "urlscan"],
+      "gau_urls_found": 156,
+      "gau_verify_enabled": true,
+      "gau_method_detection_enabled": true,
+      "gau_filter_dead_endpoints": true,
+      "gau_stats": {
+        "gau_total": 156,
+        "gau_parsed": 142,
+        "gau_new": 87,
+        "gau_overlap": 55,
+        "gau_skipped_unverified": 14,
+        "gau_skipped_dead": 8,
+        "gau_with_post": 23,
+        "gau_with_multiple_methods": 15
+      },
+
+      "kiterunner_enabled": true,
+      "kiterunner_binary_path": "~/.redamon/tools/kiterunner/kr",
+      "kiterunner_wordlist": "apiroutes-251227",
+      "kiterunner_endpoints_found": 45,
+      "kiterunner_stats": {
+        "kr_total": 45,
+        "kr_parsed": 45,
+        "kr_new": 38,
+        "kr_overlap": 7,
+        "kr_methods": {"GET": 30, "POST": 12, "PUT": 3}
+      },
+
       "proxy_used": false,
       "target_urls_count": 5,
-      "discovered_urls_count": 234
+      "target_domains_count": 3,
+      "total_discovered_urls": 321
     },
 
     "discovered_urls": [
       "https://example.com/",
       "https://example.com/login?redirect=/dashboard",
       "https://example.com/api/v1/users?id=1",
+      "https://example.com/old-admin/config.php",
       "https://example.com/search?q=test"
     ],
 
@@ -359,6 +688,7 @@ KATANA_PARAMS_ONLY = False
             "sample_urls": ["https://example.com/login?redirect=/dashboard"],
             "urls_found": 3,
             "category": "authentication",
+            "sources": ["katana", "gau"],
             "parameter_count": {
               "query": 1,
               "body": 2,
@@ -384,6 +714,30 @@ KATANA_PARAMS_ONLY = False
             "sample_urls": ["https://example.com/api/v1/users?id=1"],
             "urls_found": 5,
             "category": "api",
+            "sources": ["katana"],
+            "parameter_count": {
+              "query": 1,
+              "body": 0,
+              "path": 0,
+              "total": 1
+            }
+          },
+          "/old-admin/config.php": {
+            "path": "/old-admin/config.php",
+            "methods": ["GET"],
+            "parameters": {
+              "query": [
+                {
+                  "name": "debug",
+                  "category": "other"
+                }
+              ],
+              "body": [],
+              "path": []
+            },
+            "sample_urls": ["https://example.com/old-admin/config.php?debug=1"],
+            "category": "admin",
+            "sources": ["gau"],
             "parameter_count": {
               "query": 1,
               "body": 0,
@@ -439,6 +793,10 @@ KATANA_PARAMS_ONLY = False
       "total_endpoints": 45,
       "total_parameters": 78,
       "total_forms": 5,
+      "from_katana": 234,
+      "from_gau": 156,
+      "gau_new_endpoints": 87,
+      "gau_overlap": 55,
       "methods": {
         "GET": 38,
         "POST": 7
@@ -456,6 +814,23 @@ KATANA_PARAMS_ONLY = False
   }
 }
 ```
+
+### Endpoint Sources Field
+
+Each endpoint includes a `sources` array indicating where it was discovered:
+
+| Example | Meaning |
+|---------|---------|
+| `["katana"]` | Found only by Katana active crawling |
+| `["gau"]` | Found only by GAU passive discovery |
+| `["kiterunner"]` | Found only by Kiterunner API bruteforce |
+| `["katana", "gau"]` | Found by both Katana and GAU |
+| `["katana", "gau", "kiterunner"]` | Found by all three tools |
+
+**Why Array Format?**
+- With 3 discovery tools, a simple `"both"` string doesn't work
+- Arrays allow precise tracking of which tools found each endpoint
+- Helps prioritize endpoints found by multiple tools (higher confidence)
 
 ---
 
@@ -727,6 +1102,92 @@ KATANA_RATE_LIMIT = 200
 KATANA_JS_CRAWL = False
 ```
 
+#### "GAU returning too many URLs"
+
+```python
+# Limit URLs per domain
+GAU_MAX_URLS = 500
+
+# Use fewer providers
+GAU_PROVIDERS = ["wayback"]  # Only Wayback Machine
+
+# Filter by date range
+GAU_YEAR_RANGE = ["2022", "2024"]
+
+# Add more extensions to blacklist
+GAU_BLACKLIST_EXTENSIONS.extend(["aspx", "jsp"])
+```
+
+#### "GAU URLs not being added to results"
+
+Possible causes:
+1. URL verification filtering them out
+2. URLs from different domains (subdomains disabled)
+3. Extension blacklist filtering
+
+Solutions:
+```python
+# Disable verification to see all URLs
+GAU_VERIFY_URLS = False
+
+# Check blacklist isn't too aggressive
+GAU_BLACKLIST_EXTENSIONS = ["png", "jpg", "gif", "css"]  # Minimal
+```
+
+#### "GAU timeout errors"
+
+```python
+# Increase timeout
+GAU_TIMEOUT = 120
+
+# Reduce providers
+GAU_PROVIDERS = ["wayback", "commoncrawl"]  # Skip slower ones
+
+# Reduce threads
+GAU_THREADS = 2
+```
+
+#### "Kiterunner not finding endpoints"
+
+Possible causes:
+1. Target doesn't have REST APIs
+2. WAF blocking bruteforce attempts
+3. APIs use non-standard routes
+
+Solutions:
+```python
+# Try different wordlist
+KITERUNNER_WORDLIST = "aspx-251227"  # For ASP.NET
+
+# Reduce rate to avoid WAF
+KITERUNNER_RATE_LIMIT = 50
+
+# Add authentication headers
+KITERUNNER_HEADERS = ["Authorization: Bearer <token>"]
+```
+
+#### "Kiterunner timeout errors"
+
+```python
+# Increase scan timeout
+KITERUNNER_SCAN_TIMEOUT = 600
+
+# Reduce concurrent connections
+KITERUNNER_CONNECTIONS = 50
+
+# Increase per-request timeout
+KITERUNNER_TIMEOUT = 15
+```
+
+#### "Kiterunner too aggressive (WAF blocks)"
+
+```python
+# Stealth mode
+KITERUNNER_RATE_LIMIT = 30
+KITERUNNER_CONNECTIONS = 20
+KITERUNNER_THREADS = 10
+```
+
 ### Debug Mode
 
 Run Katana manually via Docker:
@@ -740,26 +1201,56 @@ docker run --rm \
   -silent
 ```
 
+Run GAU manually via Docker:
+
+```bash
+docker run --rm \
+  sxcurity/gau:latest \
+  --threads 5 \
+  --timeout 60 \
+  --providers wayback,commoncrawl \
+  example.com
+```
+
+Run Kiterunner manually (binary auto-downloads to ~/.redamon/tools/kiterunner/):
+
+```bash
+# Binary location after first run
+# Use -A flag for auto-downloaded wordlists
+~/.redamon/tools/kiterunner/kr scan https://example.com \
+  -A apiroutes-251227:20000 \
+  -x 50 \
+  -j 25 \
+  -t 10s
+```
+
 ---
 
 ## Security Considerations
 
 | Risk | Mitigation |
 |------|------------|
-| Rate limiting/bans | Reduce `KATANA_RATE_LIMIT` |
+| Rate limiting/bans | Reduce `KATANA_RATE_LIMIT` and `KITERUNNER_RATE_LIMIT` |
 | WAF blocking | Use custom User-Agent, reduce rate |
+| API bruteforce detection | Lower `KITERUNNER_CONNECTIONS` and `KITERUNNER_THREADS` |
 | Detection | Use Tor proxy |
 | Legal issues | Only scan authorized targets |
 
 ### Safe Defaults
 
 ```python
+# Katana (Active Crawling)
 KATANA_RATE_LIMIT = 50
 KATANA_DEPTH = 2
 KATANA_TIMEOUT = 120
 KATANA_CUSTOM_HEADERS = [
     "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)"
 ]
+
+# Kiterunner (API Bruteforce)
+KITERUNNER_RATE_LIMIT = 50
+KITERUNNER_CONNECTIONS = 30
+KITERUNNER_THREADS = 20
 ```
 
 ---
@@ -768,10 +1259,14 @@ KATANA_CUSTOM_HEADERS = [
 
 | Package | Purpose |
 |---------|---------|
-| Docker | Container runtime for Katana |
+| Docker | Container runtime for Katana, GAU, and httpx |
 | `projectdiscovery/katana:latest` | Katana Docker image (auto-pulled) |
+| `sxcurity/gau:latest` | GAU Docker image (auto-pulled) |
+| Kiterunner binary | Auto-downloaded from GitHub releases to `~/.redamon/tools/kiterunner/` |
+| `projectdiscovery/httpx:latest` | httpx Docker image for URL verification (auto-pulled) |
 | Python 3.8+ | Script runtime |
 | `html.parser` | Built-in HTML form parsing |
+| `urllib.parse` | Built-in URL parsing for GAU endpoint extraction |
 
 ---
 
@@ -779,6 +1274,15 @@ KATANA_CUSTOM_HEADERS = [
 
 - [Katana Documentation](https://github.com/projectdiscovery/katana)
 - [Katana Docker Hub](https://hub.docker.com/r/projectdiscovery/katana)
+- [GAU (GetAllUrls) Documentation](https://github.com/lc/gau)
+- [GAU Docker Hub](https://hub.docker.com/r/sxcurity/gau)
+- [Kiterunner Documentation](https://github.com/assetnote/kiterunner)
+- [Kiterunner Releases](https://github.com/assetnote/kiterunner/releases)
+- [httpx Documentation](https://github.com/projectdiscovery/httpx)
+- [Wayback Machine CDX API](https://github.com/internetarchive/wayback/tree/master/wayback-cdx-server)
+- [Common Crawl Index](https://index.commoncrawl.org/)
+- [AlienVault OTX](https://otx.alienvault.com/)
+- [URLScan.io](https://urlscan.io/)
 - [OWASP Testing Guide - Information Gathering](https://owasp.org/www-project-web-security-testing-guide/)
 - [ProjectDiscovery Blog](https://blog.projectdiscovery.io/)
 

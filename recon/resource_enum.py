@@ -5,24 +5,24 @@ Comprehensive endpoint discovery and classification.
 Discovers all endpoints (GET, POST, APIs) and organizes them by base URL.
 
 Features:
-- Katana crawling for endpoint discovery
+- Katana crawling for endpoint discovery (active)
+- GAU passive URL discovery from archives (passive)
+  - Wayback Machine, Common Crawl, OTX, URLScan
 - HTML form parsing for POST endpoints
 - Parameter extraction and classification
 - Endpoint categorization (auth, file_access, api, dynamic, static, admin)
 - Parameter type detection (id, file, search, auth params)
+- Parallel execution of Katana + GAU with merged results
 
-Pipeline: http_probe -> resource_enum -> vuln_scan
+Pipeline: http_probe -> resource_enum (Katana + GAU parallel) -> vuln_scan
 """
 
 import json
-import subprocess
-import shutil
-import re
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Set, Tuple, Optional
-from urllib.parse import urlparse, parse_qs, urljoin
-from html.parser import HTMLParser
+from typing import Dict, Optional
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor
 import sys
 
 # Add project root to path for imports
@@ -42,718 +42,75 @@ from params import (
     KATANA_SCOPE,
     KATANA_CUSTOM_HEADERS,
     KATANA_EXCLUDE_PATTERNS,
+    # GAU passive URL discovery settings
+    GAU_ENABLED,
+    GAU_DOCKER_IMAGE,
+    GAU_PROVIDERS,
+    GAU_MAX_URLS,
+    GAU_TIMEOUT,
+    GAU_THREADS,
+    GAU_BLACKLIST_EXTENSIONS,
+    GAU_YEAR_RANGE,
+    GAU_VERBOSE,
+    GAU_VERIFY_URLS,
+    GAU_VERIFY_DOCKER_IMAGE,
+    GAU_VERIFY_TIMEOUT,
+    GAU_VERIFY_RATE_LIMIT,
+    GAU_VERIFY_THREADS,
+    GAU_VERIFY_ACCEPT_STATUS,
+    # GAU method detection
+    GAU_DETECT_METHODS,
+    GAU_METHOD_DETECT_TIMEOUT,
+    GAU_METHOD_DETECT_RATE_LIMIT,
+    GAU_METHOD_DETECT_THREADS,
+    GAU_FILTER_DEAD_ENDPOINTS,
+    # Kiterunner API discovery settings
+    KITERUNNER_ENABLED,
+    KITERUNNER_WORDLIST,
+    KITERUNNER_RATE_LIMIT,
+    KITERUNNER_CONNECTIONS,
+    KITERUNNER_TIMEOUT,
+    KITERUNNER_SCAN_TIMEOUT,
+    KITERUNNER_THREADS,
+    KITERUNNER_IGNORE_STATUS,
+    KITERUNNER_MIN_CONTENT_LENGTH,
+    KITERUNNER_MATCH_STATUS,
+    KITERUNNER_HEADERS,
+    # Kiterunner method detection settings
+    KITERUNNER_DETECT_METHODS,
+    KITERUNNER_METHOD_DETECTION_MODE,
+    KITERUNNER_BRUTEFORCE_METHODS,
+    KITERUNNER_METHOD_DETECT_TIMEOUT,
+    KITERUNNER_METHOD_DETECT_RATE_LIMIT,
+    KITERUNNER_METHOD_DETECT_THREADS,
 )
 
-
-# =============================================================================
-# HTML Form Parser
-# =============================================================================
-
-class FormParser(HTMLParser):
-    """Parse HTML to extract form elements and their inputs."""
-
-    def __init__(self):
-        super().__init__()
-        self.forms = []
-        self.current_form = None
-        self.in_form = False
-
-    def handle_starttag(self, tag, attrs):
-        attrs_dict = dict(attrs)
-
-        if tag == 'form':
-            self.in_form = True
-            self.current_form = {
-                'action': attrs_dict.get('action', ''),
-                'method': attrs_dict.get('method', 'GET').upper(),
-                'enctype': attrs_dict.get('enctype', 'application/x-www-form-urlencoded'),
-                'inputs': []
-            }
-
-        elif self.in_form and tag == 'input':
-            input_info = {
-                'name': attrs_dict.get('name', ''),
-                'type': attrs_dict.get('type', 'text'),
-                'value': attrs_dict.get('value', ''),
-                'required': 'required' in attrs_dict,
-                'placeholder': attrs_dict.get('placeholder', '')
-            }
-            if input_info['name']:  # Only add inputs with names
-                self.current_form['inputs'].append(input_info)
-
-        elif self.in_form and tag == 'textarea':
-            input_info = {
-                'name': attrs_dict.get('name', ''),
-                'type': 'textarea',
-                'value': '',
-                'required': 'required' in attrs_dict
-            }
-            if input_info['name']:
-                self.current_form['inputs'].append(input_info)
-
-        elif self.in_form and tag == 'select':
-            input_info = {
-                'name': attrs_dict.get('name', ''),
-                'type': 'select',
-                'value': '',
-                'required': 'required' in attrs_dict
-            }
-            if input_info['name']:
-                self.current_form['inputs'].append(input_info)
-
-        elif self.in_form and tag == 'button':
-            btn_type = attrs_dict.get('type', 'submit')
-            if btn_type == 'submit' and attrs_dict.get('name'):
-                input_info = {
-                    'name': attrs_dict.get('name', ''),
-                    'type': 'submit',
-                    'value': attrs_dict.get('value', '')
-                }
-                self.current_form['inputs'].append(input_info)
-
-    def handle_endtag(self, tag):
-        if tag == 'form' and self.in_form:
-            self.in_form = False
-            if self.current_form:
-                self.forms.append(self.current_form)
-            self.current_form = None
-
-
-def parse_forms_from_html(html_content: str, base_url: str) -> List[Dict]:
-    """
-    Parse HTML content to extract form information.
-
-    Args:
-        html_content: Raw HTML string
-        base_url: Base URL for resolving relative form actions
-
-    Returns:
-        List of form dictionaries with action, method, and inputs
-    """
-    if not html_content:
-        return []
-
-    try:
-        parser = FormParser()
-        parser.feed(html_content)
-
-        forms = []
-        for form in parser.forms:
-            # Resolve relative action URLs
-            action = form['action']
-            if action:
-                if not action.startswith(('http://', 'https://')):
-                    action = urljoin(base_url, action)
-            else:
-                action = base_url  # Form submits to current URL
-
-            form['action'] = action
-            form['found_at'] = base_url
-            forms.append(form)
-
-        return forms
-    except Exception:
-        return []
-
-
-# =============================================================================
-# Parameter Classification
-# =============================================================================
-
-# Parameter name patterns for classification
-PARAM_PATTERNS = {
-    'id_params': [
-        r'^id$', r'_id$', r'Id$', r'^uid$', r'^pid$', r'^aid$', r'^cid$',
-        r'^user_?id$', r'^product_?id$', r'^item_?id$', r'^post_?id$',
-        r'^article_?id$', r'^page_?id$', r'^cat_?id$', r'^category_?id$',
-        r'^artist$', r'^cat$', r'^pic$', r'^num$', r'^no$', r'^index$'
-    ],
-    'file_params': [
-        r'^file$', r'^filename$', r'^path$', r'^filepath$', r'^download$',
-        r'^include$', r'^require$', r'^read$', r'^load$', r'^src$',
-        r'^template$', r'^page$', r'^doc$', r'^document$', r'^img$',
-        r'^image$', r'^attachment$'
-    ],
-    'search_params': [
-        r'^q$', r'^query$', r'^search$', r'^s$', r'^keyword$', r'^term$',
-        r'^find$', r'^filter$', r'^text$', r'^input$'
-    ],
-    'auth_params': [
-        r'^user$', r'^username$', r'^login$', r'^email$', r'^mail$',
-        r'^password$', r'^passwd$', r'^pass$', r'^pwd$', r'^token$',
-        r'^auth$', r'^key$', r'^apikey$', r'^api_key$', r'^secret$',
-        r'^session$', r'^cookie$'
-    ],
-    'redirect_params': [
-        r'^url$', r'^redirect$', r'^return$', r'^next$', r'^goto$',
-        r'^target$', r'^dest$', r'^destination$', r'^continue$', r'^ref$',
-        r'^callback$', r'^returnurl$', r'^return_url$'
-    ],
-    'command_params': [
-        r'^cmd$', r'^command$', r'^exec$', r'^execute$', r'^run$',
-        r'^shell$', r'^system$', r'^ping$', r'^host$', r'^ip$'
-    ]
-}
-
-
-def classify_parameter(param_name: str) -> str:
-    """Classify a parameter name into a category."""
-    param_lower = param_name.lower()
-
-    for category, patterns in PARAM_PATTERNS.items():
-        for pattern in patterns:
-            if re.match(pattern, param_lower, re.IGNORECASE):
-                return category
-
-    return 'other'
-
-
-def infer_parameter_type(param_name: str, sample_values: List[str]) -> str:
-    """Infer the data type of a parameter from its name and sample values."""
-    param_lower = param_name.lower()
-
-    # Check sample values first
-    if sample_values:
-        # Check if all values are numeric
-        all_numeric = all(
-            v.isdigit() or (v.startswith('-') and v[1:].isdigit())
-            for v in sample_values if v
-        )
-        if all_numeric:
-            return 'integer'
-
-        # Check if values look like file paths
-        if any('/' in v or '\\' in v or '.' in v for v in sample_values if v):
-            if any(v.endswith(('.jpg', '.png', '.gif', '.pdf', '.txt', '.html', '.php', '.js'))
-                   for v in sample_values if v):
-                return 'path'
-
-        # Check if values look like emails
-        if any('@' in v and '.' in v for v in sample_values if v):
-            return 'email'
-
-        # Check if values look like URLs
-        if any(v.startswith(('http://', 'https://')) for v in sample_values if v):
-            return 'url'
-
-    # Infer from parameter name
-    if any(p in param_lower for p in ['id', 'num', 'count', 'page', 'limit', 'offset', 'size']):
-        return 'integer'
-    if any(p in param_lower for p in ['file', 'path', 'dir', 'template', 'include']):
-        return 'path'
-    if any(p in param_lower for p in ['email', 'mail']):
-        return 'email'
-    if any(p in param_lower for p in ['url', 'link', 'redirect', 'callback']):
-        return 'url'
-    if any(p in param_lower for p in ['date', 'time', 'timestamp']):
-        return 'datetime'
-    if any(p in param_lower for p in ['bool', 'flag', 'enabled', 'active', 'is_']):
-        return 'boolean'
-
-    return 'string'
-
-
-# =============================================================================
-# Endpoint Classification
-# =============================================================================
-
-def classify_endpoint(path: str, methods: List[str], params: Dict) -> str:
-    """
-    Classify an endpoint into a category based on path, methods, and parameters.
-
-    Categories:
-    - authentication: login, signup, logout, auth-related
-    - file_access: file download, image serving, document access
-    - api: REST API endpoints
-    - admin: admin panels, dashboards
-    - dynamic: PHP/ASP/JSP pages with parameters
-    - static: HTML, CSS, JS, images
-    - upload: file upload endpoints
-    - search: search functionality
-    """
-    path_lower = path.lower()
-
-    # Check for authentication endpoints
-    auth_patterns = ['/login', '/signin', '/signup', '/register', '/logout', '/signout',
-                     '/auth', '/oauth', '/password', '/reset', '/forgot', '/session',
-                     '/token', '/jwt', '/sso']
-    if any(p in path_lower for p in auth_patterns):
-        return 'authentication'
-
-    # Check for admin endpoints
-    admin_patterns = ['/admin', '/dashboard', '/panel', '/manage', '/control',
-                      '/backend', '/cms', '/wp-admin', '/administrator']
-    if any(p in path_lower for p in admin_patterns):
-        return 'admin'
-
-    # Check for API endpoints
-    api_patterns = ['/api/', '/v1/', '/v2/', '/v3/', '/rest/', '/graphql',
-                    '/json', '/xml', '/rpc']
-    if any(p in path_lower for p in api_patterns):
-        return 'api'
-
-    # Check for file access endpoints
-    file_patterns = ['/download', '/file', '/image', '/img', '/media', '/upload',
-                     '/attachment', '/document', '/doc', '/pdf', '/export']
-    if any(p in path_lower for p in file_patterns):
-        # Check if it's upload vs download
-        if any(p in path_lower for p in ['/upload', '/import']):
-            return 'upload'
-        return 'file_access'
-
-    # Check for search endpoints
-    search_patterns = ['/search', '/find', '/query', '/filter', '/browse']
-    if any(p in path_lower for p in search_patterns):
-        return 'search'
-
-    # Check body params for auth indicators
-    body_params = params.get('body', [])
-    body_param_names = [p.get('name', '').lower() for p in body_params]
-    if any(p in body_param_names for p in ['username', 'password', 'email', 'login']):
-        return 'authentication'
-
-    # Check for static files
-    static_extensions = ['.html', '.htm', '.css', '.js', '.txt', '.xml', '.json',
-                        '.jpg', '.jpeg', '.png', '.gif', '.svg', '.ico', '.webp',
-                        '.woff', '.woff2', '.ttf', '.eot', '.pdf', '.zip']
-    if any(path_lower.endswith(ext) for ext in static_extensions):
-        return 'static'
-
-    # Check for dynamic pages (with query params)
-    dynamic_extensions = ['.php', '.asp', '.aspx', '.jsp', '.cgi', '.pl']
-    if any(path_lower.endswith(ext) for ext in dynamic_extensions):
-        return 'dynamic'
-
-    # If has query params, likely dynamic
-    if params.get('query'):
-        return 'dynamic'
-
-    # Default
-    return 'other'
-
-
-# =============================================================================
-# Docker Helpers
-# =============================================================================
-
-def is_docker_installed() -> bool:
-    """Check if Docker is installed and accessible."""
-    return shutil.which("docker") is not None
-
-
-def is_docker_running() -> bool:
-    """Check if Docker daemon is running."""
-    try:
-        result = subprocess.run(
-            ["docker", "info"],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def pull_katana_docker_image() -> bool:
-    """Pull the Katana Docker image if not present."""
-    try:
-        print(f"    [*] Pulling Katana image: {KATANA_DOCKER_IMAGE}...")
-        result = subprocess.run(
-            ["docker", "pull", KATANA_DOCKER_IMAGE],
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def is_tor_running() -> bool:
-    """Check if Tor is running by testing SOCKS proxy."""
-    try:
-        import socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        result = sock.connect_ex(('127.0.0.1', 9050))
-        sock.close()
-        return result == 0
-    except Exception:
-        return False
-
-
-# =============================================================================
-# Katana Crawler
-# =============================================================================
-
-def run_katana_crawler(target_urls: List[str], use_proxy: bool = False) -> Tuple[List[str], Dict[str, str]]:
-    """
-    Run Katana crawler to discover all endpoints.
-
-    Args:
-        target_urls: Base URLs to crawl
-        use_proxy: Whether to use Tor proxy
-
-    Returns:
-        Tuple of (discovered_urls, url_to_response_body)
-    """
-    print(f"\n[*] Running Katana crawler for endpoint discovery...")
-    print(f"    Crawl depth: {KATANA_DEPTH}")
-    print(f"    Max URLs: {KATANA_MAX_URLS}")
-    print(f"    Rate limit: {KATANA_RATE_LIMIT} req/s")
-    print(f"    Params only: {KATANA_PARAMS_ONLY}")
-
-    discovered_urls = set()
-
-    for base_url in target_urls:
-        if not base_url.startswith(('http://', 'https://')):
-            continue
-
-        # Build Katana command
-        cmd = ["docker", "run", "--rm"]
-
-        if use_proxy:
-            cmd.extend(["--network", "host"])
-
-        cmd.extend(["-v", "/tmp:/tmp"])
-
-        cmd.extend([
-            KATANA_DOCKER_IMAGE,
-            "-u", base_url,
-            "-d", str(KATANA_DEPTH),
-            "-silent",
-            "-nc",
-            "-rl", str(KATANA_RATE_LIMIT),
-            "-timeout", str(KATANA_TIMEOUT),
-            "-fs", KATANA_SCOPE,
-        ])
-
-        # JavaScript crawling
-        if KATANA_JS_CRAWL:
-            cmd.append("-jc")
-
-        # Custom headers
-        if KATANA_CUSTOM_HEADERS:
-            for header in KATANA_CUSTOM_HEADERS:
-                cmd.extend(["-H", header])
-
-        # Proxy for Tor
-        if use_proxy:
-            cmd.extend(["-proxy", "socks5://127.0.0.1:9050"])
-
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=KATANA_TIMEOUT + 60
-            )
-
-            if result.stdout:
-                for line in result.stdout.strip().split('\n'):
-                    url = line.strip()
-                    if url:
-                        # Skip URLs matching exclude patterns
-                        url_lower = url.lower()
-                        if any(pattern.lower() in url_lower for pattern in KATANA_EXCLUDE_PATTERNS):
-                            continue
-
-                        # Apply KATANA_PARAMS_ONLY filter
-                        if KATANA_PARAMS_ONLY:
-                            if '?' in url and '=' in url:
-                                discovered_urls.add(url)
-                        else:
-                            discovered_urls.add(url)
-
-                        if len(discovered_urls) >= KATANA_MAX_URLS:
-                            break
-
-        except subprocess.TimeoutExpired:
-            print(f"    [!] Katana timeout for {base_url}")
-        except Exception as e:
-            print(f"    [!] Katana error for {base_url}: {e}")
-
-        if len(discovered_urls) >= KATANA_MAX_URLS:
-            break
-
-    urls_list = sorted(list(discovered_urls))
-    print(f"    [+] Katana discovered {len(urls_list)} URLs")
-
-    return urls_list, {}
-
-
-def fetch_forms_from_urls(urls: List[str], use_proxy: bool = False, max_urls: int = 50) -> List[Dict]:
-    """
-    Fetch HTML from URLs and extract forms.
-
-    Args:
-        urls: URLs to fetch (will filter to HTML pages only)
-        use_proxy: Whether to use Tor proxy
-        max_urls: Maximum URLs to fetch for form extraction
-
-    Returns:
-        List of form dictionaries
-    """
-    import urllib.request
-    import ssl
-
-    all_forms = []
-
-    # Filter to likely HTML pages (exclude static files)
-    static_extensions = ['.css', '.js', '.jpg', '.jpeg', '.png', '.gif', '.svg',
-                         '.ico', '.woff', '.woff2', '.ttf', '.eot', '.pdf', '.zip',
-                         '.mp3', '.mp4', '.webp', '.xml', '.json', '.txt']
-
-    html_urls = []
-    for url in urls:
-        url_lower = url.lower().split('?')[0]  # Remove query params for extension check
-        if not any(url_lower.endswith(ext) for ext in static_extensions):
-            html_urls.append(url)
-
-    # Limit to avoid too many requests
-    html_urls = html_urls[:max_urls]
-
-    if not html_urls:
-        return all_forms
-
-    print(f"    [*] Fetching HTML from {len(html_urls)} URLs to extract forms...")
-
-    # Create SSL context that doesn't verify certificates (for testing)
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-
-    # Setup proxy if needed
-    if use_proxy:
-        proxy_handler = urllib.request.ProxyHandler({
-            'http': 'socks5://127.0.0.1:9050',
-            'https': 'socks5://127.0.0.1:9050'
-        })
-        opener = urllib.request.build_opener(proxy_handler, urllib.request.HTTPSHandler(context=ssl_context))
-    else:
-        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl_context))
-
-    for url in html_urls:
-        try:
-            request = urllib.request.Request(
-                url,
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-                }
-            )
-            response = opener.open(request, timeout=10)
-            content_type = response.headers.get('Content-Type', '')
-
-            # Only process HTML responses
-            if 'text/html' in content_type:
-                html_content = response.read().decode('utf-8', errors='ignore')
-                forms = parse_forms_from_html(html_content, url)
-                all_forms.extend(forms)
-
-        except Exception:
-            continue
-
-    print(f"    [+] Extracted {len(all_forms)} forms from HTML pages")
-    return all_forms
-
-
-# =============================================================================
-# Endpoint Organization
-# =============================================================================
-
-def organize_endpoints(
-    discovered_urls: List[str],
-    use_proxy: bool = False
-) -> Dict:
-    """
-    Organize discovered URLs into structured endpoint data.
-
-    Args:
-        discovered_urls: List of URLs discovered by Katana
-        use_proxy: Whether to use Tor proxy for form fetching
-
-    Returns:
-        Structured endpoint data organized by base URL
-    """
-    # Track endpoints by base URL
-    by_base_url = {}  # base_url -> {path -> endpoint_info}
-
-    # Fetch forms directly from discovered URLs (since http_probe doesn't keep body)
-    all_forms = fetch_forms_from_urls(discovered_urls, use_proxy=use_proxy, max_urls=100)
-
-    # Process each discovered URL
-    for url in discovered_urls:
-        try:
-            parsed = urlparse(url)
-            scheme = parsed.scheme or 'http'
-            host = parsed.netloc
-            path = parsed.path or '/'
-            query_string = parsed.query
-
-            base_url = f"{scheme}://{host}"
-
-            # Initialize base URL entry
-            if base_url not in by_base_url:
-                by_base_url[base_url] = {}
-
-            # Initialize endpoint entry
-            if path not in by_base_url[base_url]:
-                by_base_url[base_url][path] = {
-                    'path': path,
-                    'methods': ['GET'],
-                    'parameters': {
-                        'query': [],
-                        'body': [],
-                        'path': []
-                    },
-                    'sample_urls': [],
-                    'urls_found': 0
-                }
-
-            endpoint = by_base_url[base_url][path]
-            endpoint['urls_found'] += 1
-
-            # Keep sample URLs (max 3)
-            if len(endpoint['sample_urls']) < 3:
-                endpoint['sample_urls'].append(url)
-
-            # Parse query parameters
-            if query_string:
-                params = parse_qs(query_string, keep_blank_values=True)
-                for param_name, param_values in params.items():
-                    # Check if param already exists
-                    existing_param = next(
-                        (p for p in endpoint['parameters']['query'] if p['name'] == param_name),
-                        None
-                    )
-
-                    if existing_param:
-                        # Add new sample values
-                        for val in param_values:
-                            if val and val not in existing_param['sample_values']:
-                                existing_param['sample_values'].append(val)
-                                if len(existing_param['sample_values']) >= 5:
-                                    break
-                    else:
-                        # Create new parameter entry
-                        sample_values = [v for v in param_values if v][:5]
-                        param_info = {
-                            'name': param_name,
-                            'type': infer_parameter_type(param_name, sample_values),
-                            'sample_values': sample_values,
-                            'category': classify_parameter(param_name)
-                        }
-                        endpoint['parameters']['query'].append(param_info)
-
-        except Exception as e:
-            continue
-
-    # Process forms fetched from HTML pages
-    for form in all_forms:
-        # Add form as endpoint
-        action_url = form['action']
-        parsed = urlparse(action_url)
-        scheme = parsed.scheme or 'http'
-        host = parsed.netloc
-        path = parsed.path or '/'
-        base_url = f"{scheme}://{host}"
-        method = form['method']
-
-        if base_url not in by_base_url:
-            by_base_url[base_url] = {}
-
-        if path not in by_base_url[base_url]:
-            by_base_url[base_url][path] = {
-                'path': path,
-                'methods': [],
-                'parameters': {
-                    'query': [],
-                    'body': [],
-                    'path': []
-                },
-                'sample_urls': [action_url],
-                'urls_found': 1
-            }
-
-        endpoint = by_base_url[base_url][path]
-
-        # Add method if not present
-        if method not in endpoint['methods']:
-            endpoint['methods'].append(method)
-
-        # Add body parameters from form inputs
-        for input_field in form['inputs']:
-            if input_field['type'] in ['submit', 'button', 'hidden', 'image']:
-                continue
-
-            existing_param = next(
-                (p for p in endpoint['parameters']['body'] if p['name'] == input_field['name']),
-                None
-            )
-
-            if not existing_param:
-                param_info = {
-                    'name': input_field['name'],
-                    'type': infer_parameter_type(input_field['name'], []),
-                    'input_type': input_field['type'],
-                    'required': input_field.get('required', False),
-                    'category': classify_parameter(input_field['name'])
-                }
-                endpoint['parameters']['body'].append(param_info)
-
-    # Add classification and finalize endpoints structure
-    endpoints_by_base = {}
-
-    for base_url, paths in by_base_url.items():
-        endpoints_by_base[base_url] = {
-            'base_url': base_url,
-            'endpoints': {},
-            'summary': {
-                'total_endpoints': 0,
-                'total_parameters': 0,
-                'methods': {},
-                'categories': {}
-            }
-        }
-
-        for path, endpoint in paths.items():
-            # Classify endpoint
-            category = classify_endpoint(path, endpoint['methods'], endpoint['parameters'])
-            endpoint['category'] = category
-
-            # Count parameters
-            query_count = len(endpoint['parameters']['query'])
-            body_count = len(endpoint['parameters']['body'])
-            path_count = len(endpoint['parameters']['path'])
-            total_params = query_count + body_count + path_count
-
-            endpoint['parameter_count'] = {
-                'query': query_count,
-                'body': body_count,
-                'path': path_count,
-                'total': total_params
-            }
-
-            # Remove sample_urls from final output to save space (keep in endpoints)
-            endpoints_by_base[base_url]['endpoints'][path] = endpoint
-
-            # Update summary
-            endpoints_by_base[base_url]['summary']['total_endpoints'] += 1
-            endpoints_by_base[base_url]['summary']['total_parameters'] += total_params
-
-            for method in endpoint['methods']:
-                endpoints_by_base[base_url]['summary']['methods'][method] = \
-                    endpoints_by_base[base_url]['summary']['methods'].get(method, 0) + 1
-
-            endpoints_by_base[base_url]['summary']['categories'][category] = \
-                endpoints_by_base[base_url]['summary']['categories'].get(category, 0) + 1
-
-    return {
-        'by_base_url': endpoints_by_base,
-        'forms': all_forms
-    }
+# Import from helpers (shared with vuln_scan)
+from recon.helpers import (
+    is_docker_installed,
+    is_docker_running,
+    is_tor_running,
+)
+
+# Import from resource_enum helpers
+from recon.helpers.resource_enum import (
+    # GAU helpers
+    pull_gau_docker_image,
+    run_gau_discovery,
+    verify_gau_urls,
+    detect_gau_methods,
+    merge_gau_into_by_base_url,
+    # Kiterunner helpers
+    ensure_kiterunner_binary,
+    run_kiterunner_discovery,
+    merge_kiterunner_into_by_base_url,
+    detect_kiterunner_methods,
+    # Katana helpers
+    run_katana_crawler,
+    pull_katana_docker_image,
+    # Endpoint organization
+    organize_endpoints,
+)
 
 
 # =============================================================================
@@ -764,6 +121,12 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None) -> d
     """
     Run resource enumeration to discover and classify all endpoints.
 
+    Combines:
+    - Katana active crawling for current site structure
+    - GAU passive URL discovery from archives (Wayback, CommonCrawl, OTX, URLScan)
+
+    Both tools run in parallel for efficiency, then results are merged and deduplicated.
+
     Args:
         recon_data: Reconnaissance data from previous modules
         output_file: Optional path to save incremental results
@@ -773,6 +136,7 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None) -> d
     """
     print("\n" + "=" * 70)
     print("         RedAmon - Resource Enumeration")
+    print("         (Katana + GAU + Kiterunner Parallel Discovery)")
     print("=" * 70)
 
     # Check Docker
@@ -784,8 +148,22 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None) -> d
         print("[!] Docker daemon is not running.")
         return recon_data
 
-    # Pull Katana image
-    pull_katana_docker_image()
+    # Pull Docker images and ensure Kiterunner binary in parallel
+    print("\n[*] Setting up tools...")
+    kr_binary_path = None
+    kr_wordlist_path = None
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        katana_future = executor.submit(pull_katana_docker_image, KATANA_DOCKER_IMAGE)
+        if GAU_ENABLED:
+            gau_future = executor.submit(pull_gau_docker_image, GAU_DOCKER_IMAGE)
+        if KITERUNNER_ENABLED:
+            kr_future = executor.submit(ensure_kiterunner_binary, KITERUNNER_WORDLIST)
+        katana_future.result()
+        if GAU_ENABLED:
+            gau_future.result()
+        if KITERUNNER_ENABLED:
+            kr_binary_path, kr_wordlist_path = kr_future.result()
 
     # Check Tor status
     use_proxy = False
@@ -799,59 +177,318 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None) -> d
     # Get target URLs from http_probe
     http_probe_data = recon_data.get('http_probe', {})
     target_urls = []
+    target_domains = set()
 
     by_url = http_probe_data.get('by_url', {})
     for url, url_data in by_url.items():
         status_code = url_data.get('status_code')
         if status_code and status_code < 500:
             target_urls.append(url)
+            # Extract domain for GAU
+            host = url_data.get('host', '')
+            if host:
+                target_domains.add(host)
 
     if not target_urls:
         # Fallback to DNS data
         dns_data = recon_data.get('dns', {})
+        domain = recon_data.get('domain', '')
+        
+        # Include root domain if it has DNS records
+        domain_dns = dns_data.get('domain', {})
+        if domain and domain_dns.get('has_records'):
+            target_urls.append(f"http://{domain}")
+            target_urls.append(f"https://{domain}")
+            target_domains.add(domain)
+        
+        # Include subdomains
         subdomains = dns_data.get('subdomains', {})
         for subdomain, sub_data in subdomains.items():
             if sub_data.get('has_records'):
                 target_urls.append(f"http://{subdomain}")
                 target_urls.append(f"https://{subdomain}")
+                target_domains.add(subdomain)
 
     if not target_urls:
         print("[!] No target URLs found")
         return recon_data
 
-    print(f"  Target URLs: {len(target_urls)}")
-    print(f"  Crawl depth: {KATANA_DEPTH}")
-    print(f"  Max URLs: {KATANA_MAX_URLS}")
-    print("=" * 70 + "\n")
+    print(f"\n  Target URLs: {len(target_urls)}")
+    print(f"  Target domains (for GAU): {len(target_domains)}")
+    print(f"  Katana crawl depth: {KATANA_DEPTH}")
+    print(f"  Katana max URLs: {KATANA_MAX_URLS}")
+    print(f"  GAU enabled: {GAU_ENABLED}")
+    if GAU_ENABLED:
+        print(f"  GAU providers: {', '.join(GAU_PROVIDERS)}")
+        print(f"  GAU URL verification: {GAU_VERIFY_URLS}")
+    print(f"  Kiterunner enabled: {KITERUNNER_ENABLED}")
+    if KITERUNNER_ENABLED:
+        print(f"  Kiterunner wordlist: {KITERUNNER_WORDLIST}")
+    print("=" * 70)
 
     start_time = datetime.now()
 
-    # Run Katana crawler
-    discovered_urls, _ = run_katana_crawler(target_urls, use_proxy)
+    # Initialize results
+    katana_urls = []
+    gau_urls = []
+    gau_urls_by_domain = {}
+    kr_results = []
 
-    # Organize endpoints
-    print("\n[*] Organizing and classifying endpoints...")
-    organized_data = organize_endpoints(discovered_urls, use_proxy=use_proxy)
+    # Run Katana, GAU, and Kiterunner in parallel
+    print("\n[*] Running URL discovery (Katana + GAU + Kiterunner in parallel)...")
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {}
+
+        # Submit Katana crawler
+        futures['katana'] = executor.submit(
+            run_katana_crawler,
+            target_urls,
+            KATANA_DOCKER_IMAGE,
+            KATANA_DEPTH,
+            KATANA_MAX_URLS,
+            KATANA_RATE_LIMIT,
+            KATANA_TIMEOUT,
+            KATANA_JS_CRAWL,
+            KATANA_PARAMS_ONLY,
+            KATANA_SCOPE,
+            KATANA_CUSTOM_HEADERS,
+            KATANA_EXCLUDE_PATTERNS,
+            use_proxy
+        )
+
+        # Submit GAU discovery if enabled
+        if GAU_ENABLED and target_domains:
+            futures['gau'] = executor.submit(
+                run_gau_discovery,
+                target_domains,
+                GAU_DOCKER_IMAGE,
+                GAU_PROVIDERS,
+                GAU_THREADS,
+                GAU_TIMEOUT,
+                GAU_BLACKLIST_EXTENSIONS,
+                GAU_MAX_URLS,
+                GAU_YEAR_RANGE,
+                GAU_VERBOSE,
+                use_proxy
+            )
+
+        # Submit Kiterunner discovery if enabled (with binary paths)
+        if KITERUNNER_ENABLED and target_urls and kr_binary_path and kr_wordlist_path:
+            futures['kiterunner'] = executor.submit(
+                run_kiterunner_discovery,
+                target_urls,
+                kr_binary_path,
+                kr_wordlist_path,
+                KITERUNNER_WORDLIST,
+                KITERUNNER_RATE_LIMIT,
+                KITERUNNER_CONNECTIONS,
+                KITERUNNER_TIMEOUT,
+                KITERUNNER_SCAN_TIMEOUT,
+                KITERUNNER_THREADS,
+                KITERUNNER_IGNORE_STATUS,
+                KITERUNNER_MATCH_STATUS,
+                KITERUNNER_MIN_CONTENT_LENGTH,
+                KITERUNNER_HEADERS,
+                use_proxy
+            )
+
+        # Collect results
+        for name, future in futures.items():
+            try:
+                if name == 'katana':
+                    katana_urls, _ = future.result(timeout=KATANA_TIMEOUT + 120)
+                    print(f"\n[+] Katana completed: {len(katana_urls)} URLs")
+                elif name == 'gau':
+                    gau_urls, gau_urls_by_domain = future.result(timeout=GAU_TIMEOUT * len(GAU_PROVIDERS) + 180)
+                    print(f"[+] GAU completed: {len(gau_urls)} URLs")
+                elif name == 'kiterunner':
+                    kr_results = future.result(timeout=KITERUNNER_SCAN_TIMEOUT + 120)
+                    print(f"[+] Kiterunner completed: {len(kr_results)} API endpoints")
+            except Exception as e:
+                print(f"[!] {name} failed: {e}")
+
+    # Mark Katana endpoints with sources array
+    print("\n[*] Organizing Katana endpoints...")
+    organized_data = organize_endpoints(katana_urls, use_proxy=use_proxy)
+
+    # Mark all Katana endpoints with sources=['katana'] (array format)
+    for base_url, base_data in organized_data['by_base_url'].items():
+        for path, endpoint in base_data['endpoints'].items():
+            endpoint['sources'] = ['katana']
+
+    # Merge GAU results if available
+    gau_stats = {
+        "gau_total": 0,
+        "gau_parsed": 0,
+        "gau_new": 0,
+        "gau_overlap": 0,
+        "gau_skipped_unverified": 0,
+        "gau_out_of_scope": 0
+    }
+    gau_urls_to_process = []  # Initialize empty, will be populated if GAU enabled
+
+    if GAU_ENABLED and gau_urls:
+        # Filter GAU URLs to only include target domains (in-scope)
+        in_scope_gau_urls = []
+        out_of_scope_count = 0
+        for url in gau_urls:
+            parsed = urlparse(url)
+            host = parsed.netloc.split(':')[0] if ':' in parsed.netloc else parsed.netloc
+            if host in target_domains:
+                in_scope_gau_urls.append(url)
+            else:
+                out_of_scope_count += 1
+
+        if out_of_scope_count > 0:
+            print(f"\n[*] Filtered {out_of_scope_count} GAU URLs (out of scan scope)")
+            print(f"    [+] In-scope GAU URLs: {len(in_scope_gau_urls)}")
+
+        # Use filtered URLs for the rest of processing
+        gau_urls_to_process = in_scope_gau_urls
+
+        # Verify GAU URLs if enabled
+        verified_urls = None
+        if GAU_VERIFY_URLS and gau_urls_to_process:
+            verified_urls = verify_gau_urls(
+                gau_urls_to_process,
+                GAU_VERIFY_DOCKER_IMAGE,
+                GAU_VERIFY_TIMEOUT,
+                GAU_VERIFY_RATE_LIMIT,
+                GAU_VERIFY_THREADS,
+                GAU_VERIFY_ACCEPT_STATUS,
+                use_proxy
+            )
+
+        # Detect HTTP methods for GAU URLs using OPTIONS probe
+        url_methods = None
+        urls_to_probe = list(verified_urls) if verified_urls else gau_urls_to_process
+        if GAU_DETECT_METHODS and urls_to_probe:
+            url_methods = detect_gau_methods(
+                urls_to_probe,
+                GAU_VERIFY_DOCKER_IMAGE,
+                GAU_METHOD_DETECT_THREADS,
+                GAU_METHOD_DETECT_TIMEOUT,
+                GAU_METHOD_DETECT_RATE_LIMIT,
+                GAU_FILTER_DEAD_ENDPOINTS,
+                use_proxy
+            )
+
+        # Merge GAU into by_base_url (use in-scope URLs only)
+        print("\n[*] Merging GAU endpoints into results...")
+        organized_data['by_base_url'], gau_stats = merge_gau_into_by_base_url(
+            gau_urls_to_process,
+            organized_data['by_base_url'],
+            verified_urls,
+            url_methods
+        )
+
+        # Add out-of-scope count to stats
+        gau_stats['gau_out_of_scope'] = out_of_scope_count
+
+        print(f"    [+] GAU in-scope URLs: {gau_stats['gau_total']}")
+        if out_of_scope_count > 0:
+            print(f"    [+] GAU out-of-scope (filtered): {out_of_scope_count}")
+        print(f"    [+] GAU parsed: {gau_stats['gau_parsed']}")
+        print(f"    [+] GAU new endpoints: {gau_stats['gau_new']}")
+        print(f"    [+] GAU overlap with Katana: {gau_stats['gau_overlap']}")
+        if GAU_VERIFY_URLS:
+            print(f"    [+] GAU skipped (unverified): {gau_stats['gau_skipped_unverified']}")
+        if GAU_DETECT_METHODS:
+            print(f"    [+] GAU with POST method: {gau_stats.get('gau_with_post', 0)}")
+            print(f"    [+] GAU with multiple methods: {gau_stats.get('gau_with_multiple_methods', 0)}")
+        if GAU_FILTER_DEAD_ENDPOINTS:
+            print(f"    [+] GAU dead endpoints filtered: {gau_stats.get('gau_skipped_dead', 0)}")
+
+    # Merge Kiterunner results if available
+    kr_stats = {
+        "kr_total": 0,
+        "kr_parsed": 0,
+        "kr_new": 0,
+        "kr_overlap": 0,
+        "kr_methods": {},
+        "kr_with_multiple_methods": 0
+    }
+    kr_url_methods = None
+
+    if KITERUNNER_ENABLED and kr_results:
+        # Detect additional HTTP methods for Kiterunner endpoints
+        if KITERUNNER_DETECT_METHODS:
+            kr_url_methods = detect_kiterunner_methods(
+                kr_results,
+                GAU_VERIFY_DOCKER_IMAGE,
+                KITERUNNER_DETECT_METHODS,
+                KITERUNNER_METHOD_DETECTION_MODE,
+                KITERUNNER_BRUTEFORCE_METHODS,
+                KITERUNNER_METHOD_DETECT_TIMEOUT,
+                KITERUNNER_METHOD_DETECT_RATE_LIMIT,
+                KITERUNNER_METHOD_DETECT_THREADS,
+                use_proxy
+            )
+
+        print("\n[*] Merging Kiterunner API endpoints into results...")
+        organized_data['by_base_url'], kr_stats = merge_kiterunner_into_by_base_url(
+            kr_results,
+            organized_data['by_base_url'],
+            kr_url_methods
+        )
+
+        print(f"    [+] Kiterunner total: {kr_stats['kr_total']} endpoints")
+        print(f"    [+] Kiterunner parsed: {kr_stats['kr_parsed']}")
+        print(f"    [+] Kiterunner new endpoints: {kr_stats['kr_new']}")
+        print(f"    [+] Overlap with Katana/GAU: {kr_stats['kr_overlap']}")
+        if kr_stats['kr_methods']:
+            print(f"    [+] Methods found: {kr_stats['kr_methods']}")
+        if KITERUNNER_DETECT_METHODS and kr_stats.get('kr_with_multiple_methods', 0) > 0:
+            print(f"    [+] Endpoints with multiple methods: {kr_stats['kr_with_multiple_methods']}")
 
     end_time = datetime.now()
     duration = (end_time - start_time).total_seconds()
+
+    # Get in-scope GAU URLs (already filtered if GAU was enabled)
+    in_scope_gau = gau_urls_to_process if GAU_ENABLED and gau_urls else []
+
+    # Combine all discovered URLs (deduplicated, in-scope only)
+    all_discovered_urls = sorted(set(katana_urls + in_scope_gau))
 
     # Build result structure
     resource_enum_result = {
         'scan_metadata': {
             'scan_timestamp': start_time.isoformat(),
             'scan_duration_seconds': duration,
-            'docker_image': KATANA_DOCKER_IMAGE,
-            'crawl_depth': KATANA_DEPTH,
-            'max_urls': KATANA_MAX_URLS,
-            'rate_limit': KATANA_RATE_LIMIT,
-            'js_crawl': KATANA_JS_CRAWL,
-            'params_only': KATANA_PARAMS_ONLY,
+            # Katana metadata
+            'katana_docker_image': KATANA_DOCKER_IMAGE,
+            'katana_crawl_depth': KATANA_DEPTH,
+            'katana_max_urls': KATANA_MAX_URLS,
+            'katana_rate_limit': KATANA_RATE_LIMIT,
+            'katana_js_crawl': KATANA_JS_CRAWL,
+            'katana_params_only': KATANA_PARAMS_ONLY,
+            'katana_urls_found': len(katana_urls),
+            # GAU metadata
+            'gau_enabled': GAU_ENABLED,
+            'gau_docker_image': GAU_DOCKER_IMAGE if GAU_ENABLED else None,
+            'gau_providers': GAU_PROVIDERS if GAU_ENABLED else [],
+            'gau_urls_found_total': len(gau_urls),  # All URLs found by GAU
+            'gau_urls_in_scope': len(in_scope_gau),  # Only in-scope URLs
+            'gau_verify_enabled': GAU_VERIFY_URLS if GAU_ENABLED else False,
+            'gau_method_detection_enabled': GAU_DETECT_METHODS if GAU_ENABLED else False,
+            'gau_filter_dead_endpoints': GAU_FILTER_DEAD_ENDPOINTS if GAU_ENABLED else False,
+            'gau_stats': gau_stats,
+            # Kiterunner metadata
+            'kiterunner_enabled': KITERUNNER_ENABLED,
+            'kiterunner_binary_path': kr_binary_path if KITERUNNER_ENABLED else None,
+            'kiterunner_wordlist': KITERUNNER_WORDLIST if KITERUNNER_ENABLED else None,
+            'kiterunner_endpoints_found': len(kr_results) if KITERUNNER_ENABLED else 0,
+            'kiterunner_method_detection_enabled': KITERUNNER_DETECT_METHODS if KITERUNNER_ENABLED else False,
+            'kiterunner_method_detection_mode': KITERUNNER_METHOD_DETECTION_MODE if KITERUNNER_ENABLED else None,
+            'kiterunner_stats': kr_stats,
+            # General
             'proxy_used': use_proxy,
             'target_urls_count': len(target_urls),
-            'discovered_urls_count': len(discovered_urls)
+            'target_domains_count': len(target_domains),
+            'total_discovered_urls': len(all_discovered_urls)
         },
-        'discovered_urls': sorted(discovered_urls),
+        'discovered_urls': all_discovered_urls,
         'by_base_url': organized_data['by_base_url'],
         'forms': organized_data['forms'],
         'summary': {
@@ -865,6 +502,17 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None) -> d
                 for data in organized_data['by_base_url'].values()
             ),
             'total_forms': len(organized_data['forms']),
+            # Source breakdown
+            'from_katana': len(katana_urls),
+            'from_gau_total': len(gau_urls),  # All URLs found by GAU
+            'from_gau_in_scope': len(in_scope_gau),  # Only in-scope URLs
+            'gau_new_endpoints': gau_stats['gau_new'],
+            'gau_overlap': gau_stats['gau_overlap'],
+            # Kiterunner breakdown
+            'from_kiterunner': len(kr_results) if KITERUNNER_ENABLED else 0,
+            'kiterunner_new_endpoints': kr_stats['kr_new'],
+            'kiterunner_overlap': kr_stats['kr_overlap'],
+            'kiterunner_with_multiple_methods': kr_stats.get('kr_with_multiple_methods', 0),
             'methods': {},
             'categories': {}
         }
@@ -891,7 +539,16 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None) -> d
     print(f"\n{'=' * 70}")
     print(f"[+] RESOURCE ENUMERATION COMPLETE")
     print(f"[+] Duration: {duration:.2f} seconds")
-    print(f"[+] URLs discovered: {len(discovered_urls)}")
+    print(f"[+] Total URLs discovered: {len(all_discovered_urls)}")
+    print(f"    - Katana (active crawl): {len(katana_urls)}")
+    print(f"    - GAU (passive archive): {len(gau_urls) if GAU_ENABLED else 'disabled'}")
+    if GAU_ENABLED and gau_urls:
+        print(f"      - GAU new endpoints: {gau_stats['gau_new']}")
+        print(f"      - GAU overlap: {gau_stats['gau_overlap']}")
+    print(f"    - Kiterunner (API bruteforce): {len(kr_results) if KITERUNNER_ENABLED else 'disabled'}")
+    if KITERUNNER_ENABLED and kr_results:
+        print(f"      - Kiterunner new endpoints: {kr_stats['kr_new']}")
+        print(f"      - Kiterunner overlap: {kr_stats['kr_overlap']}")
     print(f"[+] Base URLs: {resource_enum_result['summary']['total_base_urls']}")
     print(f"[+] Endpoints: {resource_enum_result['summary']['total_endpoints']}")
     print(f"[+] Parameters: {resource_enum_result['summary']['total_parameters']}")

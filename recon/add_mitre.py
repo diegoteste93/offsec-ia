@@ -19,13 +19,10 @@ Enriches:
 """
 
 import json
-import os
 import sys
-import shutil
-import subprocess
 from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from datetime import datetime
+from typing import Dict, List, Optional
 import requests
 
 # Add project root to path for imports
@@ -354,14 +351,6 @@ def download_capec_metadata(db_path: Path) -> bool:
             if el is not None and el.text:
                 return el.text.strip()
             return None
-
-        def get_all_text(element, path):
-            """Helper to get all text from multiple elements."""
-            results = []
-            for el in element.findall(path, ns):
-                if el.text and el.text.strip():
-                    results.append(el.text.strip())
-            return results if results else None
 
         capec_metadata = {}
 

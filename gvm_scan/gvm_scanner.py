@@ -747,6 +747,10 @@ def extract_targets_from_recon(recon_data: Dict) -> Tuple[Set[str], Set[str]]:
     """
     Extract unique IPs and hostnames from recon JSON data.
     
+    Respects SUBDOMAIN_LIST filtering:
+    - Only includes root domain if it has DNS records (was resolved during scan)
+    - Only includes subdomains that have DNS records
+    
     Args:
         recon_data: RedAmon recon JSON data
         
@@ -760,19 +764,18 @@ def extract_targets_from_recon(recon_data: Dict) -> Tuple[Set[str], Set[str]]:
     if not dns_data:
         return ips, hostnames
     
-    # Main domain (use root_domain from recon metadata)
+    # Root domain - only include if it has DNS records (respects SUBDOMAIN_LIST filtering)
     domain = recon_data.get("metadata", {}).get("root_domain", "") or recon_data.get("domain", "")
-    if domain:
-        hostnames.add(domain)
-    
-    # Domain IPs
     domain_dns = dns_data.get("domain", {})
-    if domain_dns:
+    
+    if domain and domain_dns and domain_dns.get("has_records"):
+        # Root domain was resolved (included in scan via "." in SUBDOMAIN_LIST or full discovery)
+        hostnames.add(domain)
         domain_ips = domain_dns.get("ips", {})
         ips.update(domain_ips.get("ipv4", []))
         ips.update(domain_ips.get("ipv6", []))
     
-    # Subdomains
+    # Subdomains - only include those with DNS records
     for subdomain, subdomain_data in dns_data.get("subdomains", {}).items():
         if subdomain_data and subdomain_data.get("has_records"):
             hostnames.add(subdomain)

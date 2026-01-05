@@ -47,6 +47,63 @@ from gvm_scan.gvm_scanner import (
 OUTPUT_DIR = Path(__file__).parent / "output"
 
 
+def check_recon_has_live_targets(recon_data: dict) -> tuple:
+    """
+    Check if recon data indicates any reachable/live targets.
+    
+    GVM can scan network-level vulnerabilities (SSH, FTP, etc.), not just HTTP.
+    However, if both port_scan AND http_probe found nothing, hosts are likely 
+    completely unreachable and GVM will also fail.
+    
+    Args:
+        recon_data: Reconnaissance data from recon/main.py
+        
+    Returns:
+        Tuple of (has_live_targets: bool, warning_message: str or None)
+    """
+    # Check port_scan results
+    port_scan_data = recon_data.get('port_scan', {})
+    port_summary = port_scan_data.get('summary', {})
+    open_ports = port_summary.get('total_open_ports', 0)
+    
+    # Check http_probe results
+    http_probe_data = recon_data.get('http_probe', {})
+    http_summary = http_probe_data.get('summary', {})
+    live_urls = http_summary.get('live_urls', 0)
+    
+    # Check if active scans were already skipped in recon pipeline
+    active_scans_skipped = recon_data.get('metadata', {}).get('active_scans_skipped', False)
+    
+    # Case 1: Both port_scan and http_probe ran but found nothing
+    port_scan_ran = 'port_scan' in recon_data
+    http_probe_ran = 'http_probe' in recon_data
+    
+    if port_scan_ran and http_probe_ran:
+        if open_ports == 0 and live_urls == 0:
+            return False, (
+                "No open ports and no live HTTP services found in recon data. "
+                "Targets appear to be unreachable or heavily firewalled."
+            )
+    
+    # Case 2: Only http_probe ran and found nothing (port_scan might have been skipped)
+    if http_probe_ran and not port_scan_ran:
+        if live_urls == 0:
+            return False, (
+                "No live HTTP services found in recon data. "
+                "Port scan was not performed - GVM may still find vulnerabilities."
+            )
+    
+    # Case 3: Active scans were skipped in recon pipeline
+    if active_scans_skipped:
+        return False, (
+            "Active scans (resource_enum, vuln_scan) were skipped in recon pipeline. "
+            "No live targets were found."
+        )
+    
+    # Targets seem reachable
+    return True, None
+
+
 def run_vulnerability_scan(
     domain: str = TARGET_DOMAIN,
     scan_targets: str = GVM_SCAN_TARGETS,
@@ -94,6 +151,25 @@ def run_vulnerability_scan(
             print(f"[!] ERROR: {e}")
             print(f"[!] Run domain recon first: python recon/main.py")
             return {"error": str(e)}
+
+        # Check if recon data indicates reachable targets
+        has_live_targets, warning_message = check_recon_has_live_targets(recon_data)
+        
+        if not has_live_targets:
+            print(f"\n{'=' * 70}")
+            print(f"[!] SKIPPING GVM SCAN: {warning_message}")
+            print(f"{'=' * 70}")
+            return {
+                "error": "No live targets",
+                "reason": warning_message,
+                "skipped": True,
+                "metadata": {
+                    "scan_type": "vulnerability_scan",
+                    "scan_timestamp": datetime.now().isoformat(),
+                    "target_domain": root_domain,
+                    "skipped_reason": warning_message
+                }
+            }
 
         # Extract targets from recon
         ips, hostnames = extract_targets_from_recon(recon_data)

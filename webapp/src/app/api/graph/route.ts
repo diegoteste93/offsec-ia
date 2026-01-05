@@ -98,6 +98,12 @@ export async function GET(request: NextRequest) {
 
       MATCH (v:Vulnerability {project_id: $projectId})-[:HAS_CVE]->(c:CVE)-[:HAS_CWE]->(cwe:MitreData)-[r11:HAS_CAPEC]->(cap:Capec)
       RETURN cwe as n, r11 as r, cap as m
+
+      UNION
+
+      // Get TLS Certificates linked to BaseURLs
+      MATCH (u:BaseURL {project_id: $projectId})-[r12:HAS_CERTIFICATE]->(c:Certificate)
+      RETURN u as n, r12 as r, c as m
       `,
       { projectId }
     )
@@ -275,13 +281,16 @@ function getNodeName(node: Neo4jNode): string {
     }
   }
 
-  // Special handling for BaseURL nodes - show URL
+  // Special handling for BaseURL nodes - show scheme + host + port (if non-standard)
   if (label === 'BaseURL') {
     const url = props.url as string || ''
     if (url) {
       try {
         const urlObj = new URL(url)
-        return urlObj.host + (urlObj.pathname !== '/' ? urlObj.pathname : '')
+        // urlObj.host already includes port if non-standard (e.g., "example.com:8080")
+        // Default ports (80 for http, 443 for https) are not included by URL API
+        const scheme = urlObj.protocol.replace(':', '') // "https" or "http"
+        return `${scheme}://${urlObj.host}`
       } catch {
         return url
       }

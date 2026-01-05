@@ -13,8 +13,20 @@ Usage:
 """
 
 import os
+import re
 from datetime import datetime
 from neo4j import GraphDatabase
+
+
+def _is_ip_address(host: str) -> bool:
+    """Check if a string is an IP address (IPv4 or IPv6)."""
+    if not host:
+        return False
+    # IPv4 pattern
+    ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+    # IPv6 pattern (simplified)
+    ipv6_pattern = r'^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
+    return bool(re.match(ipv4_pattern, host) or re.match(ipv6_pattern, host))
 
 
 class Neo4jClient:
@@ -223,10 +235,15 @@ class Neo4jClient:
 
             # 2. Create Subdomain nodes and relationships
             subdomain_dns = dns_data.get("subdomains", {})
+            domain_dns = dns_data.get("domain", {})  # DNS data for root domain
 
             for subdomain in subdomains:
                 try:
-                    subdomain_info = subdomain_dns.get(subdomain, {})
+                    # Get DNS info: use domain_dns if subdomain equals root_domain, else use subdomain_dns
+                    if subdomain == root_domain:
+                        subdomain_info = domain_dns  # Root domain DNS is in dns.domain
+                    else:
+                        subdomain_info = subdomain_dns.get(subdomain, {})
                     has_records = subdomain_info.get("has_records", False)
 
                     # Create Subdomain node
@@ -553,6 +570,7 @@ class Neo4jClient:
         """
         stats = {
             "baseurls_created": 0,
+            "certificates_created": 0,
             "services_created": 0,
             "technologies_created": 0,
             "headers_created": 0,
@@ -612,6 +630,12 @@ class Neo4jClient:
                         baseurl_props["body_sha256"] = body_hash.get("body_sha256")
                         baseurl_props["header_sha256"] = body_hash.get("header_sha256")
 
+                    # Add TLS cipher if available (store on BaseURL for quick reference)
+                    tls_data = url_info.get("tls", {})
+                    if tls_data:
+                        baseurl_props["tls_cipher"] = tls_data.get("cipher")
+                        baseurl_props["tls_version"] = tls_data.get("version")
+
                     # Remove None values
                     baseurl_props = {k: v for k, v in baseurl_props.items() if v is not None}
 
@@ -624,6 +648,51 @@ class Neo4jClient:
                         url=url, props=baseurl_props
                     )
                     stats["baseurls_created"] += 1
+
+                    # Create Certificate node from TLS data if available
+                    if tls_data and tls_data.get("certificate"):
+                        cert_data = tls_data.get("certificate", {})
+                        subject_cn = cert_data.get("subject_cn", "")
+                        
+                        if subject_cn:
+                            # Build certificate properties
+                            cert_props = {
+                                "subject_cn": subject_cn,
+                                "user_id": user_id,
+                                "project_id": project_id,
+                                "issuer": ", ".join(cert_data.get("issuer", [])) if isinstance(cert_data.get("issuer"), list) else cert_data.get("issuer"),
+                                "not_before": cert_data.get("not_before"),
+                                "not_after": cert_data.get("not_after"),
+                                "san": cert_data.get("san", []),  # Subject Alternative Names as list
+                                "cipher": tls_data.get("cipher"),
+                                "tls_version": tls_data.get("version"),
+                                "source": "http_probe"
+                            }
+                            
+                            # Remove None values
+                            cert_props = {k: v for k, v in cert_props.items() if v is not None}
+                            
+                            # Create Certificate node (unique by subject_cn + project_id)
+                            session.run(
+                                """
+                                MERGE (c:Certificate {subject_cn: $subject_cn, project_id: $project_id})
+                                SET c += $props,
+                                    c.updated_at = datetime()
+                                """,
+                                subject_cn=subject_cn, project_id=project_id, props=cert_props
+                            )
+                            stats["certificates_created"] += 1
+                            
+                            # Create relationship: BaseURL -[:HAS_CERTIFICATE]-> Certificate
+                            session.run(
+                                """
+                                MATCH (u:BaseURL {url: $url})
+                                MATCH (c:Certificate {subject_cn: $subject_cn, project_id: $project_id})
+                                MERGE (u)-[:HAS_CERTIFICATE]->(c)
+                                """,
+                                url=url, subject_cn=subject_cn, project_id=project_id
+                            )
+                            stats["relationships_created"] += 1
 
                     # Create relationship: Service -[:SERVES_URL]-> BaseURL
                     # BaseURLs are served by HTTP/HTTPS services running on ports
@@ -1117,6 +1186,22 @@ class Neo4jClient:
             stats["errors"].append("No vuln_scan data found in recon_data")
             return stats
 
+        # Get target subdomains from scan scope - only create nodes for these
+        target_subdomains = set(recon_data.get("subdomains", []))
+        target_domain = recon_data.get("domain", "")
+
+        # Also include the main domain if no subdomains specified
+        if target_domain and not target_subdomains:
+            target_subdomains.add(target_domain)
+
+        def is_in_scope(hostname: str) -> bool:
+            """Check if a hostname is within the scan scope (target subdomains)."""
+            if not target_subdomains:
+                return True  # No filter if no subdomains defined
+            # Remove port if present
+            host_only = hostname.split(":")[0] if ":" in hostname else hostname
+            return host_only in target_subdomains
+
         with self.driver.session() as session:
             # Ensure schema is initialized
             self._init_schema(session)
@@ -1128,6 +1213,7 @@ class Neo4jClient:
             # Track created endpoints and parameters for deduplication
             created_endpoints = set()  # (baseurl, path, method)
             created_parameters = set()  # (endpoint_path, param_name, param_position)
+            skipped_out_of_scope = 0  # Track skipped URLs
 
             # Process discovered URLs with parameters (from Katana crawling)
             dast_urls = discovered_urls.get("dast_urls_with_params", [])
@@ -1144,6 +1230,11 @@ class Neo4jClient:
                     host = parsed.netloc
                     path = parsed.path or "/"
                     query_string = parsed.query
+
+                    # Skip URLs that are not in scan scope (discovered subdomains only)
+                    if not is_in_scope(host):
+                        skipped_out_of_scope += 1
+                        continue
 
                     # Construct base URL (scheme://host)
                     base_url = f"{scheme}://{host}"
@@ -1174,14 +1265,21 @@ class Neo4jClient:
                         stats["endpoints_created"] += 1
                         created_endpoints.add(endpoint_key)
 
-                        # Create relationship: BaseURL -[:HAS_ENDPOINT]-> Endpoint
+                        # Create BaseURL node if it doesn't exist and relationship
+                        # BaseURL may not exist if endpoint was discovered by crawling a different subdomain
                         session.run(
                             """
-                            MATCH (bu:BaseURL {url: $baseurl})
+                            MERGE (bu:BaseURL {url: $baseurl})
+                            ON CREATE SET bu.user_id = $user_id,
+                                          bu.project_id = $project_id,
+                                          bu.source = 'katana_crawl',
+                                          bu.updated_at = datetime()
+                            WITH bu
                             MATCH (e:Endpoint {path: $path, method: $method, baseurl: $baseurl})
                             MERGE (bu)-[:HAS_ENDPOINT]->(e)
                             """,
-                            baseurl=base_url, path=path, method=method
+                            baseurl=base_url, path=path, method=method,
+                            user_id=user_id, project_id=project_id
                         )
                         stats["relationships_created"] += 1
 
@@ -1226,6 +1324,12 @@ class Neo4jClient:
 
             # Process vulnerability findings by target
             for target_host, target_data in by_target.items():
+                # Skip targets that are not in scan scope
+                target_host_only = target_host.split(":")[0] if ":" in target_host else target_host
+                if not is_in_scope(target_host_only):
+                    skipped_out_of_scope += 1
+                    continue
+
                 findings = target_data.get("findings", [])
 
                 for finding in findings:
@@ -1247,6 +1351,13 @@ class Neo4jClient:
                         vuln_path = matched_parsed.path or "/"
                         vuln_scheme = matched_parsed.scheme or "http"
                         vuln_host = matched_parsed.netloc or target_host
+
+                        # Also check if matched_at URL host is in scope
+                        vuln_host_only = vuln_host.split(":")[0] if ":" in vuln_host else vuln_host
+                        if not is_in_scope(vuln_host_only):
+                            skipped_out_of_scope += 1
+                            continue
+
                         vuln_base_url = f"{vuln_scheme}://{vuln_host}"
 
                         # Create Vulnerability node with all fields
@@ -1346,14 +1457,20 @@ class Neo4jClient:
                             stats["endpoints_created"] += 1
                             created_endpoints.add(endpoint_key)
 
-                            # Create relationship: BaseURL -[:HAS_ENDPOINT]-> Endpoint
+                            # Create BaseURL node if it doesn't exist and relationship
                             session.run(
                                 """
-                                MATCH (bu:BaseURL {url: $baseurl})
+                                MERGE (bu:BaseURL {url: $baseurl})
+                                ON CREATE SET bu.user_id = $user_id,
+                                              bu.project_id = $project_id,
+                                              bu.source = 'vuln_scan',
+                                              bu.updated_at = datetime()
+                                WITH bu
                                 MATCH (e:Endpoint {path: $path, method: $method, baseurl: $baseurl})
                                 MERGE (bu)-[:HAS_ENDPOINT]->(e)
                                 """,
-                                baseurl=vuln_base_url, path=vuln_path, method=fuzzing_method
+                                baseurl=vuln_base_url, path=vuln_path, method=fuzzing_method,
+                                user_id=user_id, project_id=project_id
                             )
                             stats["relationships_created"] += 1
 
@@ -1633,6 +1750,7 @@ class Neo4jClient:
                         stats["vulnerabilities_created"] += 1
 
                         # Create relationship: IP -[:HAS_VULNERABILITY]-> Vulnerability
+                        # These are IP-level findings (direct IP access), so IP relationship is correct
                         if ip_address:
                             session.run(
                                 """
@@ -1654,19 +1772,10 @@ class Neo4jClient:
                             )
                             stats["relationships_created"] += 1
 
-                        # For WAF bypass: also connect to Subdomain
+                        # For WAF bypass: create WAF_BYPASS_VIA relationship (not HAS_VULNERABILITY)
+                        # The vulnerability is already connected to IP; WAF_BYPASS_VIA shows the bypass path
                         if check_type == "waf_bypass" and target_host:
-                            session.run(
-                                """
-                                MATCH (s:Subdomain {name: $subdomain})
-                                MATCH (v:Vulnerability {id: $vuln_id})
-                                MERGE (s)-[:HAS_VULNERABILITY]->(v)
-                                """,
-                                subdomain=target_host, vuln_id=vuln_id
-                            )
-                            stats["relationships_created"] += 1
-
-                            # Subdomain -[:WAF_BYPASS_VIA]-> IP
+                            # Subdomain -[:WAF_BYPASS_VIA]-> IP (shows which subdomain can bypass WAF via IP)
                             session.run(
                                 """
                                 MATCH (s:Subdomain {name: $subdomain})
@@ -1761,20 +1870,77 @@ class Neo4jClient:
                     stats["vulnerabilities_created"] += 1
 
                     # Create relationships based on finding type
-                    # For IP-related findings (direct_ip_http, direct_ip_https)
-                    if matched_ip:
-                        session.run(
-                            """
-                            MATCH (i:IP {address: $address, project_id: $project_id})
-                            MATCH (v:Vulnerability {id: $vuln_id})
-                            MERGE (i)-[:HAS_VULNERABILITY]->(v)
-                            """,
-                            address=matched_ip, project_id=project_id, vuln_id=vuln_id
-                        )
-                        stats["relationships_created"] += 1
-
-                    # For hostname-related findings (missing headers, etc.)
-                    if hostname:
+                    # Priority: IP (for IP-based URLs) > BaseURL (for hostname URLs) > Subdomain/Domain > IP
+                    # Only ONE relationship is created per vulnerability to avoid redundancy
+                    # (You can always traverse: BaseURL <- Service <- Port <- IP <- Subdomain <- Domain)
+                    
+                    relationship_created = False
+                    
+                    # For URL-based findings
+                    if url and (url.startswith("http://") or url.startswith("https://")):
+                        from urllib.parse import urlparse
+                        parsed = urlparse(url)
+                        url_host = parsed.netloc.split(':')[0]  # Remove port if present
+                        
+                        # If URL host is an IP address, connect to IP node (not BaseURL)
+                        # This keeps the vulnerability connected to the existing IP node in the graph
+                        if _is_ip_address(url_host):
+                            result = session.run(
+                                """
+                                MATCH (i:IP {address: $address, project_id: $project_id})
+                                MATCH (v:Vulnerability {id: $vuln_id})
+                                MERGE (i)-[:HAS_VULNERABILITY]->(v)
+                                RETURN count(*) as matched
+                                """,
+                                address=url_host, project_id=project_id, vuln_id=vuln_id
+                            )
+                            if result.single()["matched"] > 0:
+                                stats["relationships_created"] += 1
+                                relationship_created = True
+                        else:
+                            # URL host is a hostname - connect to existing BaseURL if it exists
+                            base_url = f"{parsed.scheme}://{parsed.netloc}"
+                            result = session.run(
+                                """
+                                MATCH (bu:BaseURL {url: $baseurl, project_id: $project_id})
+                                MATCH (v:Vulnerability {id: $vuln_id})
+                                MERGE (bu)-[:HAS_VULNERABILITY]->(v)
+                                RETURN count(*) as matched
+                                """,
+                                baseurl=base_url, project_id=project_id, vuln_id=vuln_id
+                            )
+                            if result.single()["matched"] > 0:
+                                stats["relationships_created"] += 1
+                                relationship_created = True
+                            else:
+                                # BaseURL doesn't exist, try Subdomain/Domain
+                                result = session.run(
+                                    """
+                                    MATCH (s:Subdomain {name: $hostname, project_id: $project_id})
+                                    MATCH (v:Vulnerability {id: $vuln_id})
+                                    MERGE (s)-[:HAS_VULNERABILITY]->(v)
+                                    RETURN count(*) as matched
+                                    """,
+                                    hostname=url_host, project_id=project_id, vuln_id=vuln_id
+                                )
+                                if result.single()["matched"] > 0:
+                                    stats["relationships_created"] += 1
+                                    relationship_created = True
+                                else:
+                                    # Try Domain
+                                    session.run(
+                                        """
+                                        MATCH (d:Domain {name: $hostname, project_id: $project_id})
+                                        MATCH (v:Vulnerability {id: $vuln_id})
+                                        MERGE (d)-[:HAS_VULNERABILITY]->(v)
+                                        """,
+                                        hostname=url_host, project_id=project_id, vuln_id=vuln_id
+                                    )
+                                    stats["relationships_created"] += 1
+                                    relationship_created = True
+                    
+                    # For hostname-only findings (no URL): connect to Subdomain/Domain
+                    elif hostname and not relationship_created:
                         # Try to link to Subdomain node
                         result = session.run(
                             """
@@ -1787,6 +1953,7 @@ class Neo4jClient:
                         )
                         if result.single()["matched"] > 0:
                             stats["relationships_created"] += 1
+                            relationship_created = True
                         else:
                             # Try Domain node if not a subdomain
                             session.run(
@@ -1798,20 +1965,17 @@ class Neo4jClient:
                                 hostname=hostname, project_id=project_id, vuln_id=vuln_id
                             )
                             stats["relationships_created"] += 1
+                            relationship_created = True
 
-                    # For BaseURL-related findings
-                    if url and (url.startswith("http://") or url.startswith("https://")):
-                        from urllib.parse import urlparse
-                        parsed = urlparse(url)
-                        base_url = f"{parsed.scheme}://{parsed.netloc}"
-
+                    # For IP-only findings (no URL, no hostname): connect to IP
+                    elif matched_ip and not relationship_created:
                         session.run(
                             """
-                            MATCH (bu:BaseURL {url: $baseurl, project_id: $project_id})
+                            MATCH (i:IP {address: $address, project_id: $project_id})
                             MATCH (v:Vulnerability {id: $vuln_id})
-                            MERGE (bu)-[:HAS_VULNERABILITY]->(v)
+                            MERGE (i)-[:HAS_VULNERABILITY]->(v)
                             """,
-                            baseurl=base_url, project_id=project_id, vuln_id=vuln_id
+                            address=matched_ip, project_id=project_id, vuln_id=vuln_id
                         )
                         stats["relationships_created"] += 1
 
@@ -1858,6 +2022,9 @@ class Neo4jClient:
             print(f"[+] Created {stats['parameters_created']} Parameter nodes")
             print(f"[+] Created {stats['vulnerabilities_created']} Vulnerability nodes")
             print(f"[+] Created {stats['relationships_created']} relationships")
+            if skipped_out_of_scope > 0:
+                print(f"[*] Skipped {skipped_out_of_scope} items out of scan scope")
+                stats["skipped_out_of_scope"] = skipped_out_of_scope
 
             if stats["errors"]:
                 print(f"[!] {len(stats['errors'])} errors occurred")
@@ -1895,6 +2062,23 @@ class Neo4jClient:
             stats["errors"].append("No resource_enum data found in recon_data")
             return stats
 
+        # Get target subdomains from scan scope - only create nodes for these
+        target_subdomains = set(recon_data.get("subdomains", []))
+        target_domain = recon_data.get("domain", "")
+
+        # Also include the main domain if no subdomains specified
+        if target_domain and not target_subdomains:
+            target_subdomains.add(target_domain)
+
+        def is_in_scope(base_url: str) -> bool:
+            """Check if a base URL's hostname is within the scan scope."""
+            if not target_subdomains:
+                return True  # No filter if no subdomains defined
+            from urllib.parse import urlparse
+            parsed = urlparse(base_url)
+            host = parsed.netloc.split(":")[0] if ":" in parsed.netloc else parsed.netloc
+            return host in target_subdomains
+
         with self.driver.session() as session:
             # Ensure schema is initialized
             self._init_schema(session)
@@ -1905,9 +2089,14 @@ class Neo4jClient:
             # Track created items to avoid duplicates
             created_endpoints = set()
             created_parameters = set()
+            skipped_out_of_scope = 0
 
             # Process endpoints by base URL
             for base_url, base_data in by_base_url.items():
+                # Skip base URLs that are not in scan scope
+                if not is_in_scope(base_url):
+                    skipped_out_of_scope += 1
+                    continue
                 endpoints = base_data.get("endpoints", {})
 
                 for path, endpoint_info in endpoints.items():
@@ -1948,14 +2137,20 @@ class Neo4jClient:
                             stats["endpoints_created"] += 1
                             created_endpoints.add(endpoint_key)
 
-                            # Create relationship: BaseURL -[:HAS_ENDPOINT]-> Endpoint
+                            # Create BaseURL node if it doesn't exist and relationship
                             session.run(
                                 """
-                                MATCH (bu:BaseURL {url: $baseurl})
+                                MERGE (bu:BaseURL {url: $baseurl})
+                                ON CREATE SET bu.user_id = $user_id,
+                                              bu.project_id = $project_id,
+                                              bu.source = 'resource_enum',
+                                              bu.updated_at = datetime()
+                                WITH bu
                                 MATCH (e:Endpoint {path: $path, method: $method, baseurl: $baseurl})
                                 MERGE (bu)-[:HAS_ENDPOINT]->(e)
                                 """,
-                                baseurl=base_url, path=path, method=method
+                                baseurl=base_url, path=path, method=method,
+                                user_id=user_id, project_id=project_id
                             )
                             stats["relationships_created"] += 1
 
@@ -2158,6 +2353,9 @@ class Neo4jClient:
             print(f"[+] Created {stats['parameters_created']} Parameter nodes")
             print(f"[+] Processed {stats['forms_created']} form endpoints")
             print(f"[+] Created {stats['relationships_created']} relationships")
+            if skipped_out_of_scope > 0:
+                print(f"[*] Skipped {skipped_out_of_scope} base URLs out of scan scope")
+                stats["skipped_out_of_scope"] = skipped_out_of_scope
 
             if stats["errors"]:
                 print(f"[!] {len(stats['errors'])} errors occurred")

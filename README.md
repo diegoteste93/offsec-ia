@@ -34,15 +34,15 @@ RedAmon executes scans in a modular pipeline. Each module adds data to a single 
 │                              RedAmon Scanning Pipeline                                │
 ├───────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                       │
-│  ┌────────────┐   ┌────────────┐   ┌────────────┐   ┌────────────────────────────┐   │
-│  │  domain_   │──►│ port_scan  │──►│ http_probe │──►│        vuln_scan           │   │
-│  │  discovery │   │            │   │            │   │  ┌──────────┬───────────┐  │   │
-│  │  • WHOIS   │   │ • Port scan│   │ • HTTP     │   │  │ • Web    │ • CWE     │  │   │
-│  │  • DNS     │   │ • CDN      │   │ • Tech     │   │  │   vulns  │   weakness│  │   │
-│  │  • Subs    │   │ • Services │   │ • TLS/SSL  │   │  │ • CVEs   │ • CAPEC   │  │   │
-│  └────────────┘   └────────────┘   └────────────┘   │  └──────────┴───────────┘  │   │
-│        │                │                │          └────────────────────────────┘   │
-│        └────────────────┴────────────────┴───────────────────────│                   │
+│  ┌────────────┐   ┌────────────┐   ┌────────────┐   ┌────────────┐   ┌─────────────┐  │
+│  │  domain_   │──►│ port_scan  │──►│ http_probe │──►│ resource_  │──►│  vuln_scan  │  │
+│  │  discovery │   │            │   │            │   │   enum     │   │  • Web vulns│  │
+│  │  • WHOIS   │   │ • Port scan│   │ • HTTP     │   │ • Katana   │   │  • CVEs     │  │
+│  │  • DNS     │   │ • CDN      │   │ • Tech     │   │ • GAU      │   │  • CWE      │  │
+│  │  • Subs    │   │ • Services │   │ • TLS/SSL  │   │ • Forms    │   │  • CAPEC    │  │
+│  └────────────┘   └────────────┘   └────────────┘   └────────────┘   └─────────────┘  │
+│        │                │                │                │                │          │
+│        └────────────────┴────────────────┴────────────────┴────────────────┘          │
 │                                          │                                            │
 │                                          ▼                                            │
 │                       📄 recon/output/recon_<domain>.json                             │
@@ -181,7 +181,61 @@ WAPPALYZER_MIN_CONFIDENCE = 50         # Minimum confidence level
 
 ---
 
-### Module 4: `vuln_scan` - Web Application Vulnerability Scanning + MITRE Enrichment
+### Module 4: `resource_enum` - Endpoint Discovery (Katana + GAU + Kiterunner)
+
+**Purpose:** Comprehensive endpoint discovery combining active crawling (Katana), passive historical URL discovery (GAU), and API bruteforcing (Kiterunner) for maximum coverage.
+
+| What It Finds | Examples |
+|---------------|----------|
+| **Active endpoints** | Current site structure via Katana crawling |
+| **Historical URLs** | Old/deleted pages from Wayback Machine, CommonCrawl |
+| **Hidden API routes** | Undocumented APIs via Kiterunner (40k+ Swagger specs) |
+| **Admin panels** | `/admin`, `/wp-admin`, `/debug` endpoints |
+| **API routes** | `/api/v1/users`, `/graphql`, REST endpoints |
+| **Forms** | Login forms, file uploads, search forms |
+| **Parameters** | Query params, body params, path params |
+
+**Execution:** Runs Katana, GAU, and Kiterunner in **parallel** via Docker, then merges results with deduplication.
+
+**Key Parameters:**
+```python
+# Katana (Active Crawling)
+KATANA_DEPTH = 3                       # Crawl depth
+KATANA_MAX_URLS = 1000                 # Max URLs per target
+KATANA_JS_CRAWL = True                 # Parse JavaScript files
+
+# GAU (Passive URL Discovery)
+GAU_ENABLED = True                     # Enable GAU
+GAU_PROVIDERS = ["wayback", "commoncrawl", "otx", "urlscan"]
+GAU_MAX_URLS = 1000                    # Max URLs per domain
+GAU_VERIFY_URLS = True                 # Verify URLs are live
+
+# Kiterunner (API Bruteforcing)
+KITERUNNER_ENABLED = True              # Enable Kiterunner
+KITERUNNER_WORDLIST = "apiroutes-251227"  # 354k+ API routes
+KITERUNNER_RATE_LIMIT = 100            # Requests per second
+```
+
+**Three Discovery Methods:**
+
+| Tool | Method | What It Finds |
+|------|--------|---------------|
+| **Katana** | Active crawling | Current live endpoints (follows links) |
+| **GAU** | Passive archives | Historical/deleted endpoints (Wayback, CommonCrawl) |
+| **Kiterunner** | API bruteforcing | Hidden APIs not linked anywhere (Swagger specs) |
+
+**Why All Three?**
+- Katana finds current live endpoints (what's linked)
+- GAU finds historical endpoints (what was indexed)
+- Kiterunner finds hidden APIs (what's not linked or indexed)
+- Combined coverage discovers 3-5x more endpoints than any single tool
+- Each endpoint tracked with `sources: ["katana", "gau", "kiterunner"]`
+
+📖 **Detailed documentation:** [readmes/README.RESOURCE_ENUM.md](readmes/README.RESOURCE_ENUM.md)
+
+---
+
+### Module 5: `vuln_scan` - Web Application Vulnerability Scanning + MITRE Enrichment
 
 **Purpose:** Deep web application security testing with thousands of vulnerability templates. Automatically enriches discovered CVEs with MITRE CWE weaknesses and CAPEC attack patterns.
 
@@ -222,7 +276,7 @@ SECURITY_CHECK_NO_RATE_LIMITING = True   # App: Rate limiting check
 
 ---
 
-### Module 5: `github` - Secret Hunting
+### Module 6: `github` - Secret Hunting
 
 **Purpose:** Find leaked credentials, API keys, and secrets in GitHub repositories.
 
@@ -255,6 +309,9 @@ Understanding what each tool does is crucial for effective reconnaissance. RedAm
 | **DNS** | Domain resolution & records | Layer 3 (Network) | ⚡ Instant | IPs, MX, TXT, CNAME records |
 | **Naabu** | Port discovery | Layer 4 (Transport) | ⚡ Very Fast | Open ports, protocols |
 | **httpx** | HTTP probing & tech detection | Layer 7 (Application) | ⚡ Fast | Live URLs, technologies, TLS |
+| **Katana** | Active endpoint crawling | Layer 7 (Application) | ⚡ Fast | Current endpoints, forms |
+| **GAU** | Passive URL discovery | OSINT/Archives | ⚡ Fast | Historical/deleted endpoints |
+| **Kiterunner** | API route bruteforcing | Layer 7 (Application) | 🔄 Medium | Hidden API endpoints |
 | **Nuclei** | Vulnerability scanning | Layer 7 (Application) | 🔄 Medium | CVEs, misconfigs, vulns |
 | **MITRE CWE/CAPEC** | Weakness & attack pattern enrichment | Data Enrichment | ⚡ Fast | CWE weaknesses, CAPEC patterns |
 | **GVM/OpenVAS** | Deep vulnerability assessment | All Layers | 🐢 Slow | Full security audit |
@@ -357,6 +414,77 @@ testphp.vulnweb.com → 44.228.249.3 (A record)
 
 ---
 
+### 🕸️ GAU - Passive URL Discovery (GetAllUrls)
+
+| What It Does | What It Finds |
+|--------------|---------------|
+| Queries historical archives | **Wayback Machine URLs**: Pages from web.archive.org |
+| Aggregates OSINT sources | **CommonCrawl URLs**: Large-scale web crawl data |
+| Zero target interaction | **OTX URLs**: AlienVault threat intelligence |
+| Discovers hidden endpoints | **URLScan URLs**: Security scan results |
+
+**Detection Capabilities:**
+
+| Capability | Status | Details |
+|------------|--------|---------|
+| Historical URLs | ✅ Primary | Discovers old/deleted pages |
+| Admin Panels | ✅ Yes | `/admin`, `/wp-admin`, `/debug` |
+| Backup Files | ✅ Yes | `.bak`, `.sql`, `backup.zip` |
+| Debug Endpoints | ✅ Yes | `/phpinfo.php`, `/debug/` |
+| API Endpoints | ✅ Yes | Older API versions, hidden routes |
+| Target Interaction | ❌ None | 100% passive, queries archives only |
+
+**Why It Matters:**
+```
+Historical discovery finds:
+  - Old admin panels still accessible
+  - Backup files left behind
+  - Debug endpoints forgotten
+  - API versions with vulnerabilities
+  - Config files exposed temporarily
+```
+
+**Speed:** ⚡ ~10-30 seconds per domain | **Requires:** Docker
+
+---
+
+### 🚀 Kiterunner - API Route Bruteforcer
+
+| What It Does | What It Finds |
+|--------------|---------------|
+| Bruteforces API routes | **Hidden endpoints**: APIs not linked or indexed |
+| Uses Swagger/OpenAPI specs | **REST routes**: `/api/v1/users`, `/api/admin` |
+| Smart parameter handling | **GraphQL endpoints**: `/graphql`, `/gql` |
+| Detects valid responses | **Undocumented APIs**: Internal/debug endpoints |
+
+**Detection Capabilities:**
+
+| Capability | Status | Details |
+|------------|--------|---------|
+| Hidden API Discovery | ✅ Primary | Uses 40,000+ routes from Swagger specs |
+| REST Endpoints | ✅ Excellent | GET, POST, PUT, DELETE, PATCH |
+| Response Validation | ✅ Yes | Filters 404s, validates live responses |
+| Rate Limiting | ✅ Yes | Configurable delay between requests |
+| Custom Headers | ✅ Yes | Auth tokens, API keys |
+| Target Interaction | ⚠️ Active | Sends requests to discover routes |
+
+**Why Kiterunner?**
+```
+Traditional wordlists miss API routes because:
+  - They're not designed for APIs
+  - APIs use different naming conventions
+  - Many routes need specific HTTP methods
+
+Kiterunner uses 40,000+ real Swagger/OpenAPI specs:
+  - Knows correct HTTP methods for each route
+  - Sends appropriate headers/parameters
+  - Finds routes that wordlists miss
+```
+
+**Speed:** 🔄 ~2-5 minutes per target | **Requires:** Docker
+
+---
+
 ### 🎯 Nuclei - Vulnerability Scanner + CVE Lookup
 
 | What It Does | What It Finds |
@@ -422,24 +550,28 @@ CVEs found: 23 (2 CRITICAL, 10 HIGH)
 
 ### 📈 Detailed Feature Matrix
 
-| Feature | WHOIS | DNS | Naabu | httpx | Nuclei | GVM |
-|---------|-------|-----|-------|-------|--------|-----|
-| **Domain Info** | ✅ | ⚠️ | ❌ | ❌ | ❌ | ❌ |
-| **IP Resolution** | ❌ | ✅ | ⚠️ | ✅ | ❌ | ❌ |
-| **Subdomain Discovery** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Port Scanning** | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
-| **Service Detection** | ❌ | ❌ | ⚠️ | ✅ | ⚠️ | ✅ |
-| **Live URL Check** | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
-| **Technology Detection** | ❌ | ❌ | ❌ | ✅ **+ Wappalyzer** | ⚠️ | ⚠️ |
-| **CMS Plugin Detection** | ❌ | ❌ | ❌ | ✅ **Wappalyzer** | ❌ | ❌ |
-| **TLS/SSL Analysis** | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| **CDN Detection** | ❌ | ⚠️ | ✅ | ✅ | ❌ | ❌ |
-| **CVE Detection** | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
-| **CVE Lookup (version)** | ❌ | ❌ | ❌ | ❌ | ✅ **NEW** | ❌ |
-| **Web Vuln Scanning** | ❌ | ❌ | ❌ | ❌ | ✅ | ⚠️ |
-| **XSS/SQLi Testing** | ❌ | ❌ | ❌ | ❌ | ✅ | ⚠️ |
-| **Network Vuln Scan** | ❌ | ❌ | ❌ | ❌ | ⚠️ | ✅ |
-| **Compliance Check** | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Feature | WHOIS | DNS | Naabu | httpx | Katana | GAU | Kiterunner | Nuclei | GVM |
+|---------|-------|-----|-------|-------|--------|-----|------------|--------|-----|
+| **Domain Info** | ✅ | ⚠️ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **IP Resolution** | ❌ | ✅ | ⚠️ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Subdomain Discovery** | ❌ | ✅ | ❌ | ❌ | ❌ | ⚠️ | ❌ | ❌ | ❌ |
+| **Port Scanning** | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Service Detection** | ❌ | ❌ | ⚠️ | ✅ | ❌ | ❌ | ❌ | ⚠️ | ✅ |
+| **Live URL Check** | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Endpoint Discovery** | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ |
+| **Historical URLs** | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ **Primary** | ❌ | ❌ | ❌ |
+| **Hidden API Discovery** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ **Primary** | ❌ | ❌ |
+| **Form Parsing** | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Technology Detection** | ❌ | ❌ | ❌ | ✅ **+ Wappalyzer** | ❌ | ❌ | ❌ | ⚠️ | ⚠️ |
+| **CMS Plugin Detection** | ❌ | ❌ | ❌ | ✅ **Wappalyzer** | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **TLS/SSL Analysis** | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| **CDN Detection** | ❌ | ⚠️ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **CVE Detection** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| **CVE Lookup (version)** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **Web Vuln Scanning** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ⚠️ |
+| **XSS/SQLi Testing** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ⚠️ |
+| **Network Vuln Scan** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ⚠️ | ✅ |
+| **Compliance Check** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 
 **Legend:** ✅ Primary/Excellent | ⚠️ Limited/Basic | ❌ Not supported
 
@@ -464,11 +596,16 @@ CVEs found: 23 (2 CRITICAL, 10 HIGH)
 │       │              (Feeds port info to httpx)                                 │
 │       ▼                                                                         │
 │  🔬 httpx        → Probe HTTP services, detect technologies                     │
-│       │              (Feeds live URLs + tech versions to Nuclei)                │
+│       │              (Feeds live URLs to resource_enum)                         │
 │       ▼                                                                         │
-│  🎯 Nuclei       → Scan for vulnerabilities on live URLs                        │
+│  🕸️ resource_enum → Endpoint discovery (Katana + GAU + Kiterunner in parallel)  │
+│       │              ├── Katana: Active crawling (current site)                 │
+│       │              ├── GAU: Passive discovery (historical URLs)               │
+│       │              └── Kiterunner: API bruteforce (hidden APIs)               │
+│       │              (Merged endpoints feed to Nuclei)                          │
+│       ▼                                                                         │
+│  🎯 Nuclei       → Scan for vulnerabilities on discovered endpoints             │
 │       │              + CVE Lookup for detected technologies                     │
-│       │              (nginx, PHP, jQuery → query NVD for CVEs)                  │
 │       ▼                                                                         │
 │  🔗 MITRE CWE/CAPEC → Enrich CVEs with weakness & attack patterns               │
 │       │              (CVE → CWE hierarchy → CAPEC direct mappings)               │
@@ -579,7 +716,11 @@ sudo systemctl start tor
 docker pull projectdiscovery/naabu:latest
 docker pull projectdiscovery/httpx:latest
 docker pull projectdiscovery/nuclei:latest
-docker pull projectdiscovery/katana:latest  # For DAST crawling
+docker pull projectdiscovery/katana:latest  # For active crawling
+docker pull sxcurity/gau:latest             # For passive URL discovery
+
+# Kiterunner (auto-downloaded binary, no Docker needed)
+# Binary is downloaded from GitHub releases to ~/.redamon/tools/kiterunner/
 ```
 
 ---

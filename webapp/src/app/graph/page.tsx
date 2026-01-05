@@ -68,28 +68,46 @@ function formatNeo4jDateTime(value: unknown): string | null {
 }
 
 const NODE_COLORS: Record<string, string> = {
-  Domain: '#3b82f6',
-  Subdomain: '#8b5cf6',
-  IP: '#22c55e',
-  Host: '#f59e0b',
-  Port: '#38bdf8',  // Sky blue
-  Service: '#0891b2',  // Darker cyan/teal
-  Vulnerability: '#ff3333',  // Brilliant red (critical severity shown in legend)
-  Technology: '#84cc16',
-  CVE: '#ff3377',        // Magenta-red (critical severity shown in legend)
-  MitreData: '#0ea5e9',  // Sky blue - CWE weakness data
-  Capec: '#f97316',      // Orange - Attack patterns
-  Certificate: '#fb923c',
-  Email: '#ec4899',
-  ASN: '#14b8a6',
-  CIDR: '#a855f7',
-  URL: '#6366f1',
-  BaseURL: '#6366f1',    // Same as URL
-  Endpoint: '#4b5563',   // Semi-transparent dark grey
-  Parameter: '#c084fc',  // Purple for parameters
-  Header: '#f472b6',
-  Project: '#fbbf24',
-  Default: '#6b7280',
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CRITICAL SECURITY (Red family) - Immediate attention needed
+  // ═══════════════════════════════════════════════════════════════════════════
+  Vulnerability: '#ef4444',  // Bright red - DANGER, highest priority
+  CVE: '#dc2626',            // Deep red - Known vulnerabilities
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // THREAT INTELLIGENCE (Orange family) - Attack context
+  // ═══════════════════════════════════════════════════════════════════════════
+  MitreData: '#f97316',      // Orange - CWE/MITRE techniques
+  Capec: '#eab308',          // Yellow - Attack patterns
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DOMAIN HIERARCHY (Blue family) - Recon foundation
+  // ═══════════════════════════════════════════════════════════════════════════
+  Domain: '#1e3a8a',         // Deep navy - Root/foundation (most important)
+  Subdomain: '#2563eb',      // Royal blue - Children of domain
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // NETWORK LAYER (Cyan/Teal family) - Infrastructure
+  // ═══════════════════════════════════════════════════════════════════════════
+  IP: '#0d9488',             // Teal - Network addresses
+  Port: '#0e7490',           // Dark cyan - Network ports
+  Service: '#06b6d4',        // Cyan - Running services
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // WEB APPLICATION LAYER (Purple family) - Web-specific assets
+  // ═══════════════════════════════════════════════════════════════════════════
+  BaseURL: '#6366f1',        // Indigo - Web entry points
+  Endpoint: '#8b5cf6',       // Purple - Paths/routes
+  Parameter: '#a855f7',      // Light purple - Inputs (attack surface)
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CONTEXT & METADATA (Neutral family) - Supporting information
+  // ═══════════════════════════════════════════════════════════════════════════
+  Technology: '#22c55e',     // Green - Tech stack (good to know)
+  Certificate: '#d97706',    // Amber - TLS/security context
+  Header: '#78716c',         // Stone gray - HTTP metadata
+
+  Default: '#6b7280',        // Gray - Fallback
 }
 
 // Severity-based size multipliers
@@ -145,7 +163,7 @@ async function fetchGraphData(projectId: string): Promise<GraphData> {
 }
 
 export default function GraphPage() {
-  const projectId = 'project_testphp.vulnweb.com_2'
+  const projectId = 'project_2'
   const [is3D, setIs3D] = useState(true)
   const [showLabels, setShowLabels] = useState(false)
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null)
@@ -407,18 +425,18 @@ export default function GraphPage() {
               nodeRelSize={6}
               linkLabel={(link) => (link as GraphLink).type}
               linkColor={(link) => {
-                if (!selectedNode) return '#374151'
+                if (!selectedNode) return '#9ca3af'
                 const graphLink = link as GraphLink
                 const sourceId = typeof graphLink.source === 'string' ? graphLink.source : (graphLink.source as GraphNode).id
                 const targetId = typeof graphLink.target === 'string' ? graphLink.target : (graphLink.target as GraphNode).id
-                return (sourceId === selectedNode.id || targetId === selectedNode.id) ? '#60a5fa' : '#374151'
+                return (sourceId === selectedNode.id || targetId === selectedNode.id) ? '#60a5fa' : '#9ca3af'
               }}
               linkDirectionalArrowColor={(link) => {
-                if (!selectedNode) return '#374151'
+                if (!selectedNode) return '#9ca3af'
                 const graphLink = link as GraphLink
                 const sourceId = typeof graphLink.source === 'string' ? graphLink.source : (graphLink.source as GraphNode).id
                 const targetId = typeof graphLink.target === 'string' ? graphLink.target : (graphLink.target as GraphNode).id
-                return (sourceId === selectedNode.id || targetId === selectedNode.id) ? '#60a5fa' : '#374151'
+                return (sourceId === selectedNode.id || targetId === selectedNode.id) ? '#60a5fa' : '#9ca3af'
               }}
               linkWidth={(link) => {
                 if (!selectedNode) return 1
@@ -526,18 +544,18 @@ export default function GraphPage() {
               nodeOpacity={1}
               linkLabel={(link) => (link as GraphLink).type}
               linkColor={(link) => {
-                if (!selectedNode) return '#4b5563'
+                if (!selectedNode) return '#9ca3af'
                 const graphLink = link as GraphLink
                 const sourceId = typeof graphLink.source === 'string' ? graphLink.source : (graphLink.source as GraphNode).id
                 const targetId = typeof graphLink.target === 'string' ? graphLink.target : (graphLink.target as GraphNode).id
-                return (sourceId === selectedNode.id || targetId === selectedNode.id) ? '#60a5fa' : '#4b5563'
+                return (sourceId === selectedNode.id || targetId === selectedNode.id) ? '#60a5fa' : '#9ca3af'
               }}
               linkWidth={(link) => {
-                if (!selectedNode) return 1
+                if (!selectedNode) return 1.5
                 const graphLink = link as GraphLink
                 const sourceId = typeof graphLink.source === 'string' ? graphLink.source : (graphLink.source as GraphNode).id
                 const targetId = typeof graphLink.target === 'string' ? graphLink.target : (graphLink.target as GraphNode).id
-                return (sourceId === selectedNode.id || targetId === selectedNode.id) ? 3 : 1
+                return (sourceId === selectedNode.id || targetId === selectedNode.id) ? 3.5 : 1.5
               }}
               linkDirectionalParticles={(link) => {
                 if (!selectedNode) return 0

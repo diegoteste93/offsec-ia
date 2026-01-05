@@ -1,3 +1,9 @@
+RLM with REPL
+https://github.com/alexzhang13/rlm
+https://github.com/alexzhang13/rlm-minimal
+https://alexzhang13.github.io/blog/2025/rlm/?utm_source=www.theunwindai.com&utm_medium=referral&utm_campaign=claude-code-s-hidden-multi-agent-orchestration-now-open-source
+
+
 # RedAmon Agentic AI - Autonomous Penetration Testing
 
 ## Overview

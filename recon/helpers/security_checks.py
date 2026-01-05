@@ -25,10 +25,92 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Direct IP Access Security Checks
 # =============================================================================
 
+def _is_ip_address(host: str) -> bool:
+    """Check if a string is an IP address (v4 or v6)."""
+    import re
+    # IPv4 pattern
+    ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+    # IPv6 pattern (simplified)
+    ipv6_pattern = r'^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
+    return bool(re.match(ipv4_pattern, host) or re.match(ipv6_pattern, host))
+
+
+def _analyze_redirect_chain(ip: str, scheme: str, timeout: int = 10) -> Dict:
+    """
+    Analyze redirect behavior when accessing IP directly.
+    
+    Returns:
+        Dict with redirect analysis:
+        - redirects: bool - whether it redirects
+        - final_url: str - final destination URL
+        - final_host: str - final destination host
+        - redirects_to_hostname: bool - whether final destination is a hostname (not IP)
+        - redirect_count: int - number of redirects
+    """
+    url = f"{scheme}://{ip}"
+    result = {
+        "redirects": False,
+        "final_url": url,
+        "final_host": ip,
+        "redirects_to_hostname": False,
+        "redirect_count": 0,
+        "initial_status_code": None,
+    }
+    
+    try:
+        # First, check initial response without following redirects
+        initial_response = requests.get(
+            url,
+            timeout=timeout,
+            allow_redirects=False,
+            verify=False,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
+        )
+        result["initial_status_code"] = initial_response.status_code
+        
+        # Check if it's a redirect
+        if initial_response.status_code in [301, 302, 303, 307, 308]:
+            result["redirects"] = True
+            
+            # Now follow redirects to see where it goes
+            try:
+                final_response = requests.get(
+                    url,
+                    timeout=timeout,
+                    allow_redirects=True,
+                    verify=False,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
+                )
+                result["final_url"] = final_response.url
+                result["redirect_count"] = len(final_response.history)
+                
+                # Extract host from final URL
+                from urllib.parse import urlparse
+                parsed = urlparse(final_response.url)
+                final_host = parsed.netloc.split(':')[0]  # Remove port if present
+                result["final_host"] = final_host
+                
+                # Check if final destination is a hostname (not an IP)
+                result["redirects_to_hostname"] = not _is_ip_address(final_host)
+                
+            except requests.exceptions.RequestException:
+                # If following redirects fails, we still know it redirects
+                pass
+    
+    except requests.exceptions.RequestException:
+        pass
+    
+    return result
+
+
 def check_direct_ip_http(ip: str, timeout: int = 10) -> Optional[Dict]:
     """
     Check if HTTP is accessible directly via IP without TLS.
     This can indicate WAF bypass opportunities or exposed services.
+    
+    Intelligently handles redirects:
+    - If IP redirects to a hostname: Low/Info severity (mitigated)
+    - If IP serves content or redirects to same IP: Medium severity
 
     Args:
         ip: IP address to check
@@ -47,17 +129,54 @@ def check_direct_ip_http(ip: str, timeout: int = 10) -> Optional[Dict]:
         )
 
         if response.status_code < 500:
+            # Analyze redirect behavior
+            redirect_info = _analyze_redirect_chain(ip, "http", timeout)
+            
+            # Determine severity based on redirect behavior
+            if redirect_info["redirects"] and redirect_info["redirects_to_hostname"]:
+                # Redirects to a hostname - mitigated, lower severity
+                severity = "info"
+                description = (
+                    f"HTTP service on IP {ip} redirects to hostname {redirect_info['final_host']}. "
+                    f"This is a mitigated configuration - the server enforces hostname-based access. "
+                    f"However, the IP still responds which reveals server existence."
+                )
+                evidence = (
+                    f"HTTP {response.status_code} redirect → {redirect_info['final_url']} "
+                    f"({redirect_info['redirect_count']} redirect(s))"
+                )
+            elif redirect_info["redirects"]:
+                # Redirects but stays on IP - still concerning
+                severity = "medium"
+                description = (
+                    f"HTTP service is accessible directly via IP {ip} without TLS encryption. "
+                    f"Server redirects but final destination is still IP-based. "
+                    "This may allow attackers to bypass WAF/CDN protections or intercept traffic."
+                )
+                evidence = f"HTTP {response.status_code} redirect to {redirect_info['final_url']}"
+            else:
+                # Serves content directly - most concerning
+                severity = "medium"
+                description = (
+                    f"HTTP service is accessible directly via IP {ip} without TLS encryption. "
+                    "Server serves content directly on IP without redirecting to hostname. "
+                    "This may allow attackers to bypass WAF/CDN protections or intercept traffic."
+                )
+                evidence = f"HTTP {response.status_code} response - content served directly"
+            
             return {
                 "type": "direct_ip_http",
-                "severity": "medium",
+                "severity": severity,
                 "name": "Direct IP HTTP Access",
-                "description": f"HTTP service is accessible directly via IP {ip} without TLS encryption. "
-                              "This may allow attackers to bypass WAF/CDN protections or intercept traffic.",
+                "description": description,
                 "url": url,
                 "matched_ip": ip,
                 "status_code": response.status_code,
                 "server": response.headers.get("Server", ""),
-                "evidence": f"HTTP {response.status_code} response received",
+                "evidence": evidence,
+                "redirects": redirect_info["redirects"],
+                "redirects_to_hostname": redirect_info["redirects_to_hostname"],
+                "final_url": redirect_info["final_url"] if redirect_info["redirects"] else None,
             }
     except requests.exceptions.RequestException:
         pass
@@ -69,6 +188,10 @@ def check_direct_ip_https(ip: str, timeout: int = 10) -> Optional[Dict]:
     """
     Check if HTTPS is accessible directly via IP.
     Less severe than HTTP but still indicates direct IP exposure.
+    
+    Intelligently handles redirects:
+    - If IP redirects to a hostname: Info severity (mitigated)
+    - If IP serves content or redirects to same IP: Low severity
 
     Args:
         ip: IP address to check
@@ -88,17 +211,54 @@ def check_direct_ip_https(ip: str, timeout: int = 10) -> Optional[Dict]:
         )
 
         if response.status_code < 500:
+            # Analyze redirect behavior
+            redirect_info = _analyze_redirect_chain(ip, "https", timeout)
+            
+            # Determine severity based on redirect behavior
+            if redirect_info["redirects"] and redirect_info["redirects_to_hostname"]:
+                # Redirects to a hostname - mitigated, info only
+                severity = "info"
+                description = (
+                    f"HTTPS service on IP {ip} redirects to hostname {redirect_info['final_host']}. "
+                    f"This is a properly mitigated configuration. "
+                    f"The IP responds but enforces hostname-based access with TLS."
+                )
+                evidence = (
+                    f"HTTPS {response.status_code} redirect → {redirect_info['final_url']} "
+                    f"({redirect_info['redirect_count']} redirect(s))"
+                )
+            elif redirect_info["redirects"]:
+                # Redirects but stays on IP - low concern
+                severity = "low"
+                description = (
+                    f"HTTPS service is accessible directly via IP {ip}. "
+                    f"Server redirects but final destination is still IP-based. "
+                    "While encrypted, this may allow bypassing CDN/WAF protections."
+                )
+                evidence = f"HTTPS {response.status_code} redirect to {redirect_info['final_url']}"
+            else:
+                # Serves content directly - concerning
+                severity = "low"
+                description = (
+                    f"HTTPS service is accessible directly via IP {ip}. "
+                    "Server serves content directly on IP without redirecting to hostname. "
+                    "While encrypted, this may allow bypassing CDN/WAF protections."
+                )
+                evidence = f"HTTPS {response.status_code} response - content served directly"
+            
             return {
                 "type": "direct_ip_https",
-                "severity": "low",
+                "severity": severity,
                 "name": "Direct IP HTTPS Access",
-                "description": f"HTTPS service is accessible directly via IP {ip}. "
-                              "While encrypted, this may allow bypassing CDN/WAF protections.",
+                "description": description,
                 "url": url,
                 "matched_ip": ip,
                 "status_code": response.status_code,
                 "server": response.headers.get("Server", ""),
-                "evidence": f"HTTPS {response.status_code} response received",
+                "evidence": evidence,
+                "redirects": redirect_info["redirects"],
+                "redirects_to_hostname": redirect_info["redirects_to_hostname"],
+                "final_url": redirect_info["final_url"] if redirect_info["redirects"] else None,
             }
     except requests.exceptions.RequestException:
         pass

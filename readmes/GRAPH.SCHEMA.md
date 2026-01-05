@@ -283,7 +283,33 @@ FOR (u:BaseURL) ON (u.status_code);
 
 ---
 
-### 7. Endpoint
+### 7. Certificate
+TLS/SSL certificates discovered during HTTP probing. Contains certificate metadata for security analysis.
+
+```cypher
+(:Certificate {
+    subject_cn: "*.beta80group.it",          // Common Name (UNIQUE per project)
+    user_id: "samgiam",                       // Owner/user identifier
+    project_id: "project_2",                  // Project identifier
+    issuer: "DigiCert Inc",                   // Certificate issuer
+    not_before: "2025-09-02T00:00:00Z",       // Valid from date
+    not_after: "2026-10-03T23:59:59Z",        // Expiration date
+    san: ["*.beta80group.it", "beta80group.it"],  // Subject Alternative Names
+    cipher: "TLS_AES_128_GCM_SHA256",         // TLS cipher suite
+    tls_version: "TLSv1.3",                   // TLS version (if detected)
+    source: "http_probe"                      // Discovery source
+})
+```
+
+**Constraints:**
+```cypher
+CREATE CONSTRAINT cert_unique IF NOT EXISTS
+FOR (c:Certificate) REQUIRE (c.subject_cn, c.project_id) IS UNIQUE;
+```
+
+---
+
+### 8. Endpoint
 Specific web application endpoints (paths) discovered through Katana crawling or vulnerability scanning.
 These are linked to their parent BaseURL and contain discovered parameters.
 
@@ -632,8 +658,14 @@ HTTP response headers (all captured headers).
 // BaseURL uses technologies (detected by httpx/wappalyzer)
 (BaseURL)-[:USES_TECHNOLOGY {confidence: 100, detected_by: "httpx"}]->(Technology)
 
+// BaseURL has TLS certificate (if HTTPS)
+(BaseURL)-[:HAS_CERTIFICATE]->(Certificate)
+
 // BaseURL has HTTP headers
 (BaseURL)-[:HAS_HEADER]->(Header)
+
+// Security check vulnerabilities (missing headers, etc.) connect to BaseURL
+(BaseURL)-[:HAS_VULNERABILITY]->(Vulnerability)
 
 // Note: DAST vulnerabilities connect via Endpoint (FOUND_AT) and Parameter (AFFECTS_PARAMETER)
 // rather than directly to BaseURL, to avoid redundant connections in the graph.
@@ -644,6 +676,48 @@ HTTP response headers (all captured headers).
 
 ### Vulnerability Relationships
 
+**IMPORTANT: No Redundant Connections & No Isolated Nodes**
+
+Each vulnerability connects to exactly ONE **existing** parent node based on its context.
+This ensures vulnerabilities are always connected to the graph (no isolated nodes).
+
+| Finding Type | Connects To | Why |
+|--------------|-------------|-----|
+| IP-based URL (`http://15.161.171.153`) | **IP only** | URL host is an IP - connect to existing IP node |
+| Hostname URL (`https://example.com`) | **BaseURL** (existing) | Connect to existing BaseURL from http_probe |
+| Hostname URL (no BaseURL exists) | **Subdomain/Domain** | Fallback to host node if BaseURL not found |
+| Host-only (SSL issues on `example.com:443`) | **Subdomain only** | It's about the host, not a specific URL |
+| DAST findings (SQLi, XSS) | **Endpoint** (via FOUND_AT) | It's about the specific path/parameter |
+
+**Key Rules:**
+1. **Never create isolated BaseURL nodes** - only connect to existing nodes
+2. **IP-based URLs connect to IP nodes** - keeps direct IP access findings connected
+3. **Hostname URLs try BaseURL first** - falls back to Subdomain/Domain if not found
+
+This avoids:
+```
+❌ Subdomain -[:HAS_VULNERABILITY]-> Vulnerability
+❌ BaseURL -[:HAS_VULNERABILITY]-> Vulnerability  (same vuln, redundant!)
+
+❌ Creating isolated BaseURL nodes for IP-based URLs like http://15.161.171.153
+   (These would have no connection to IP nodes in the graph)
+```
+
+Instead, use graph traversal to find related entities:
+```cypher
+// Find all vulnerabilities for a subdomain (via BaseURL)
+MATCH (s:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)
+      -[:RUNS_SERVICE]->(:Service)-[:SERVES_URL]->(bu:BaseURL)
+      -[:HAS_VULNERABILITY]->(v:Vulnerability)
+WHERE s.name = $hostname
+RETURN v
+
+// Find direct IP access vulnerabilities
+MATCH (s:Subdomain)-[:RESOLVES_TO]->(ip:IP)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+WHERE v.type IN ['direct_ip_http', 'direct_ip_https']
+RETURN s.name, ip.address, v.name, v.severity
+```
+
 ```cypher
 // Vulnerability affects parameter (the injectable parameter that was fuzzed)
 (Vulnerability)-[:AFFECTS_PARAMETER]->(Parameter)
@@ -653,6 +727,21 @@ HTTP response headers (all captured headers).
 
 // Vulnerability associated with CVE (if matched)
 (Vulnerability)-[:ASSOCIATED_CVE]->(CVE)
+
+// Security check vulnerabilities connect to the most specific EXISTING entity:
+// Priority: IP (for IP-based URLs) > BaseURL > Subdomain/Domain
+
+// - IP for IP-based URL findings (e.g., http://15.161.171.153 direct access)
+//   Connects to existing IP node to stay integrated with graph
+(IP)-[:HAS_VULNERABILITY]->(Vulnerability)
+
+// - BaseURL for hostname URL findings (e.g., https://example.com missing headers)
+//   Only connects to EXISTING BaseURL nodes (from http_probe)
+(BaseURL)-[:HAS_VULNERABILITY]->(Vulnerability)
+
+// - Subdomain/Domain for host-level findings (fallback when BaseURL doesn't exist)
+(Subdomain)-[:HAS_VULNERABILITY]->(Vulnerability)
+(Domain)-[:HAS_VULNERABILITY]->(Vulnerability)
 ```
 
 ---
@@ -727,24 +816,49 @@ HTTP response headers (all captured headers).
                                               │   │     │         HAS_HEADER
                                      HAS_ENDPOINT │     │             │
                                               │   │ USES_TECHNOLOGY   │
-                                        ┌─────▼──┐│     │         ┌───▼───┐
-                                        │Endpoint││     │         │Header │
-                                        └──┬──┬──┘│     │         └───────┘
-                                           │  │   │     │
-                                    HAS_PARAMETER │     │
-                                           │  │FOUND_AT │
-                                     ┌─────▼──┼─┐ │ ┌───▼──────────┐
-                                     │Parameter│ │ │  Technology  │
-                                     └─────┬──┼─┘ │ └───────┬──────┘
+                                              │   │     │         ┌───▼───┐
+                                              │   │     │         │Header │
+                                              │   │     │         └───────┘
+                                              │   │     │
+                                        ┌─────▼──┐│     │
+                                        │Endpoint││     │
+                                        └──┬──┬──┘│ ┌───▼──────────┐
+                                           │  │   │ │  Technology  │
+                                    HAS_PARAMETER │ └───────┬──────┘
                                            │  │   │         │
-                                 AFFECTS_PARAMETER│   HAS_KNOWN_CVE
-                                           │  │   │         │
-                                    ┌──────▼──▼───┤  ┌──────▼──────┐
-                                    │ Vulnerability│  │     CVE     │
-                                    │  (DAST)      │  └──────▲──────┘
-                                    └──────────┬───┘         │
-                                               │       ASSOCIATED_CVE
-                                               └─────────────┘
+                                           │  │FOUND_AT     │
+                                           │  │   │   HAS_KNOWN_CVE
+                                     ┌─────▼──┼─┐ │         │
+                                     │Parameter│ │  ┌──────▼──────┐
+                                     └─────┬──┼─┘ │  │     CVE     │
+                                           │  │   │  └──────▲──────┘
+                                 AFFECTS_PARAMETER│         │
+                                           │  │   │   ASSOCIATED_CVE
+                                    ┌──────▼──▼───┤         │
+                                    │ Vulnerability│◄───────┘
+                                    │  (DAST)      │
+                                    └──────────────┘
+
+
+Security Check Vulnerabilities connect to EXISTING nodes only:
+
+    IP-based URL findings (http://15.161.171.153):
+    ┌────────┐  HAS_VULNERABILITY   ┌───────────────┐
+    │   IP   │─────────────────────▶│ Vulnerability │
+    │(exists)│                      │ (direct_ip_*) │
+    └────────┘                      └───────────────┘
+
+    Hostname URL findings (https://example.com):
+    ┌─────────┐  HAS_VULNERABILITY   ┌───────────────┐
+    │ BaseURL │─────────────────────▶│ Vulnerability │
+    │ (exists)│                      │ (missing_hdr) │
+    └─────────┘                      └───────────────┘
+
+Note: Each vulnerability connects to exactly ONE EXISTING parent:
+  - IP-based URL → IP node (keeps direct IP findings connected to graph)
+  - Hostname URL → existing BaseURL (from http_probe)
+  - Hostname URL (no BaseURL) → Subdomain/Domain (fallback)
+  - No isolated nodes are created!
 ```
 
 ---

@@ -5,34 +5,65 @@ Output is saved as structured JSON to the output folder.
 """
 
 import json
+import time
 import whois
 from typing import Any
 from datetime import datetime
 from pathlib import Path
 
+from params import WHOIS_MAX_RETRIES
 
 # Output directory for JSON results
 OUTPUT_DIR = Path(__file__).parent / "output"
 
 
-def get_whois_data(domain: str):
+def get_whois_data(domain: str, max_retries: int = None):
     """
-    Get WHOIS information for a domain.
+    Get WHOIS information for a domain with retry logic.
     
     Args:
         domain: The domain to lookup (e.g., "example.com")
+        max_retries: Maximum retry attempts (defaults to WHOIS_MAX_RETRIES from params)
         
     Returns:
         Tuple of (whois_result_dict_like_object, domain_string).
         
     Raises:
-        Exception: If WHOIS lookup fails.
+        Exception: If WHOIS lookup fails after all retries.
     """
+    if max_retries is None:
+        max_retries = WHOIS_MAX_RETRIES
+    
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            w = whois.whois(domain)
+            # Check if we got valid data (not all nulls)
+            if w and (w.domain_name or w.registrar or w.creation_date):
+                return w, domain
+            # If data is empty, treat as failure and retry
+            if attempt < max_retries - 1:
+                delay = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                print(f"[!] WHOIS returned empty data, retrying in {delay}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+                continue
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                delay = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                print(f"[!] WHOIS failed: {str(e)}, retrying in {delay}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+            continue
+    
+    # If we got here with empty data but no exception, return the last result
     try:
         w = whois.whois(domain)
         return w, domain
     except Exception as e:
-        raise Exception(f"WHOIS lookup failed for {domain}: {str(e)}")
+        last_error = e
+    
+    raise Exception(f"WHOIS lookup failed for {domain} after {max_retries} attempts: {str(last_error)}")
 
 
 def _serialize_for_json(value: Any) -> Any:
