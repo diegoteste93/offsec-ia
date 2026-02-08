@@ -1077,6 +1077,22 @@ These containers are designed to be deployed alongside the main stack so the AI 
 
 ---
 
+## Contributing
+
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to get started, code style conventions, and the pull request process.
+
+---
+
+## Maintainer
+
+**Samuele Giampieri** — creator and lead maintainer.
+
+- [LinkedIn](https://www.linkedin.com/in/samuele-giampieri-b1b67597/)
+- [Devergo Labs](https://www.devergolabs.com/)
+- [GitHub](https://github.com/samugit83)
+
+---
+
 ## Legal
 
 This project is released under the [MIT License](LICENSE).
