@@ -229,6 +229,7 @@ class AgentOrchestrator:
                 "await_approval": "await_approval",
                 "await_question": "await_question",
                 "generate_response": "generate_response",
+                "think": "think",
             }
         )
 
@@ -401,6 +402,7 @@ class AgentOrchestrator:
                     "session_id": session_id,
                     "awaiting_user_approval": False,
                     "phase_transition_pending": None,
+                    "_abort_transition": False,
                     "original_objective": state.get("original_objective", latest_message),  # Backward compat
                 }
 
@@ -427,6 +429,7 @@ class AgentOrchestrator:
             "session_id": session_id,
             "awaiting_user_approval": False,
             "phase_transition_pending": None,
+            "_abort_transition": False,
         }
 
     async def _think_node(self, state: AgentState, config = None) -> dict:
@@ -827,9 +830,14 @@ class AgentOrchestrator:
                 updates["awaiting_user_approval"] = True
             else:
                 # Auto-approve if not required
+                logger.info(f"[{user_id}/{project_id}/{session_id}] Auto-approving phase transition (approval not required): {phase} → {to_phase}")
                 updates["current_phase"] = to_phase
                 updates["phase_history"] = state.get("phase_history", []) + [
                     PhaseHistoryEntry(phase=to_phase).model_dump()
+                ]
+                updates["_just_transitioned_to"] = to_phase
+                updates["messages"] = [
+                    AIMessage(content=f"Phase transition from {phase} to {to_phase} auto-approved (approval not required in settings). Now operating in {to_phase} phase. Proceed with the objective.")
                 ]
 
         elif decision.action == "ask_user":
@@ -1106,9 +1114,8 @@ class AgentOrchestrator:
         else:  # abort
             return {
                 **clear_approval_state,
-                "task_complete": True,
-                "completion_reason": "Phase transition cancelled by user",
-                "messages": [AIMessage(content="Phase transition cancelled. Ending session.")],
+                "_abort_transition": True,
+                "messages": [AIMessage(content="Phase transition cancelled by user. Continuing in current phase. What would you like to do next?")],
             }
 
     async def _await_question_node(self, state: AgentState, config = None) -> dict:
@@ -1179,6 +1186,14 @@ class AgentOrchestrator:
     async def _generate_response_node(self, state: AgentState, config = None) -> dict:
         """Generate final response summarizing the session."""
         user_id, project_id, session_id = get_identifiers(state, config)
+
+        # If this was an aborted phase transition, just output the cancel message
+        # without generating a full report — keep session alive for next user message
+        if state.get("_abort_transition"):
+            logger.info(f"[{user_id}/{project_id}/{session_id}] Abort transition — skipping full report")
+            return {
+                "_abort_transition": False,
+            }
 
         logger.info(f"[{user_id}/{project_id}/{session_id}] Generating final response...")
 
@@ -1261,6 +1276,10 @@ class AgentOrchestrator:
             # If transition is pending, await approval
             if state.get("phase_transition_pending"):
                 return "await_approval"
+            # If transition was auto-approved (no pending, but phase changed), continue thinking
+            if state.get("_just_transitioned_to"):
+                logger.info(f"Phase auto-approved to {state.get('_just_transitioned_to')}, continuing to think")
+                return "think"
             # Transition was ignored - route based on tool availability
             if tool_name:
                 logger.info(f"Transition ignored, executing tool: {tool_name}")
@@ -1279,6 +1298,10 @@ class AgentOrchestrator:
         """Route after processing approval."""
         # If task is complete (abort case), generate response
         if state.get("task_complete"):
+            return "generate_response"
+
+        # If abort - generate response and wait for user's next message
+        if state.get("_abort_transition"):
             return "generate_response"
 
         # Otherwise continue to think node

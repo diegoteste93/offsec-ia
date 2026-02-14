@@ -149,10 +149,10 @@ _current_project_id: Optional[str] = None
 
 def load_project_settings(project_id: str) -> dict[str, Any]:
     """
-    Fetch and cache settings for a specific project from webapp API.
+    Fetch settings for a specific project from webapp API.
 
-    Called by the orchestrator when it receives a project_id from the frontend.
-    Skips reload if settings are already loaded for the same project.
+    Called by the orchestrator on every invocation to ensure settings
+    reflect the latest values saved in the database.
 
     Args:
         project_id: The project ID received from the frontend
@@ -161,10 +161,6 @@ def load_project_settings(project_id: str) -> dict[str, Any]:
         Dictionary of settings in SCREAMING_SNAKE_CASE format
     """
     global _settings, _current_project_id
-
-    # Skip if already loaded for this project
-    if _current_project_id == project_id and _settings is not None:
-        return _settings
 
     webapp_url = os.environ.get('WEBAPP_API_URL')
 

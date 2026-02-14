@@ -377,6 +377,7 @@ class AgentState(TypedDict):
     _decision: Optional[dict]  # LLM decision from think node
     _tool_result: Optional[dict]  # Result from tool execution
     _just_transitioned_to: Optional[str]  # Phase we just transitioned to (prevents re-requesting)
+    _abort_transition: bool  # True when user aborted a phase transition (routes to generate_response)
 
     # Metasploit state tracking
     msf_session_reset_done: bool  # True if metasploit was reset at start of this session
@@ -484,6 +485,7 @@ def create_initial_state(
         "_decision": None,
         "_tool_result": None,
         "_just_transitioned_to": None,
+        "_abort_transition": False,
         # Metasploit state
         "msf_session_reset_done": False,
     }
