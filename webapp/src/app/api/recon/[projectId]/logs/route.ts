@@ -6,7 +6,7 @@ interface RouteParams {
   params: Promise<{ projectId: string }>
 }
 
-function getOrchestratorBaseUrl() {
+function getOrchestratorBaseUrl(_request?: Request) {
   return (RECON_ORCHESTRATOR_URL || 'http://127.0.0.1:8010').replace(/\/$/, '')
 }
 

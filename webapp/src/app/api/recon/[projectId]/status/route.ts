@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
 
 const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL
 
@@ -6,11 +6,11 @@ interface RouteParams {
   params: Promise<{ projectId: string }>
 }
 
-function getOrchestratorBaseUrl() {
+function getOrchestratorBaseUrl(_request?: Request) {
   return (RECON_ORCHESTRATOR_URL || 'http://127.0.0.1:8010').replace(/\/$/, '')
 }
 
-export async function GET(request: NextRequest, { params }: RouteParams) {
+export async function GET(_request: Request, { params }: RouteParams) {
   try {
     const { projectId } = await params
     const orchestratorBaseUrl = getOrchestratorBaseUrl(request)
