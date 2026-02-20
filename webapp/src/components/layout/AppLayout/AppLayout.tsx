@@ -1,5 +1,6 @@
 'use client'
 
+import { usePathname } from 'next/navigation'
 import { GlobalHeader } from '../GlobalHeader'
 import { NavigationBar } from '../NavigationBar'
 import { Footer } from '../Footer'
@@ -10,6 +11,12 @@ interface AppLayoutProps {
 }
 
 export function AppLayout({ children }: AppLayoutProps) {
+  const pathname = usePathname()
+
+  if (pathname === '/login') {
+    return <main className={styles.main}>{children}</main>
+  }
+
   return (
     <div className={styles.layout}>
       <GlobalHeader />
