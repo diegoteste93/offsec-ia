@@ -9,7 +9,7 @@
     "start": "next start",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
-    "postinstall": "prisma generate"
+    "postinstall": "sh -c \"if [ -f prisma/schema.prisma ]; then prisma generate; else echo Skipping prisma generate: prisma/schema.prisma not found; fi\""
   },
   "dependencies": {
     "@prisma/client": "^6.19.2",
