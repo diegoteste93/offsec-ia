@@ -14,9 +14,16 @@ function hashPassword(password: string, salt?: string): string {
   return `${actualSalt}:${hash}`
 }
 
-function verifyPassword(password: string, stored: string): boolean {
+function isPasswordHashFormatValid(stored: string | null | undefined): stored is string {
+  if (!stored || typeof stored !== 'string') return false
+  const [salt, hash] = stored.split(':')
+  return Boolean(salt && hash)
+}
+
+function verifyPassword(password: string, stored: string | null | undefined): boolean {
+  if (!isPasswordHashFormatValid(stored)) return false
+
   const [salt, originalHash] = stored.split(':')
-  if (!salt || !originalHash) return false
   const hashBuffer = Buffer.from(scryptSync(password, salt, 64).toString('hex'), 'hex')
   const originalBuffer = Buffer.from(originalHash, 'hex')
   if (hashBuffer.length !== originalBuffer.length) return false
@@ -25,16 +32,30 @@ function verifyPassword(password: string, stored: string): boolean {
 
 export async function ensureAdminExists() {
   const admin = await prisma.user.findUnique({ where: { email: ADMIN_EMAIL } })
-  if (admin) return admin
 
-  return prisma.user.create({
-    data: {
-      name: ADMIN_NAME,
-      email: ADMIN_EMAIL,
-      passwordHash: hashPassword(ADMIN_DEFAULT_PASSWORD),
-      role: 'ADMIN'
-    }
-  })
+  if (!admin) {
+    return prisma.user.create({
+      data: {
+        name: ADMIN_NAME,
+        email: ADMIN_EMAIL,
+        passwordHash: hashPassword(ADMIN_DEFAULT_PASSWORD),
+        role: 'ADMIN'
+      }
+    })
+  }
+
+  if (!isPasswordHashFormatValid(admin.passwordHash) || admin.role !== 'ADMIN') {
+    return prisma.user.update({
+      where: { id: admin.id },
+      data: {
+        name: admin.name || ADMIN_NAME,
+        passwordHash: hashPassword(ADMIN_DEFAULT_PASSWORD),
+        role: 'ADMIN'
+      }
+    })
+  }
+
+  return admin
 }
 
 export async function createSession(userId: string) {
@@ -101,4 +122,4 @@ export async function getAuthenticatedUser() {
   return user
 }
 
-export { hashPassword, verifyPassword, SESSION_COOKIE }
+export { hashPassword, verifyPassword, SESSION_COOKIE, isPasswordHashFormatValid }

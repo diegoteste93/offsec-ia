@@ -2,6 +2,21 @@ import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { createSession, ensureAdminExists, verifyPassword } from '@/lib/auth'
 
+function getLoginInfraError(error: unknown): string | null {
+  if (!(error instanceof Error)) return null
+  const msg = error.message || ''
+
+  if (msg.includes('Environment variable not found: DATABASE_URL')) {
+    return 'Database is not configured. Set DATABASE_URL and run Prisma migrations.'
+  }
+
+  if (msg.includes('Can\'t reach database server')) {
+    return 'Database is unreachable. Verify your local database is running.'
+  }
+
+  return null
+}
+
 export async function POST(request: NextRequest) {
   try {
     await ensureAdminExists()
@@ -26,6 +41,11 @@ export async function POST(request: NextRequest) {
       role: user.role
     })
   } catch (error) {
+    const infraError = getLoginInfraError(error)
+    if (infraError) {
+      return NextResponse.json({ error: infraError }, { status: 503 })
+    }
+
     console.error('Login failed:', error)
     return NextResponse.json({ error: 'Login failed' }, { status: 500 })
   }
