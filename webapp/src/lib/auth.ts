@@ -8,6 +8,8 @@ const ADMIN_EMAIL = 'admin@local'
 const ADMIN_NAME = 'Administrator'
 const ADMIN_DEFAULT_PASSWORD = 'Mudar123@'
 
+let authSchemaChecked = false
+
 function hashPassword(password: string, salt?: string): string {
   const actualSalt = salt || randomBytes(16).toString('hex')
   const hash = scryptSync(password, actualSalt, 64).toString('hex')
@@ -30,7 +32,49 @@ function verifyPassword(password: string, stored: string | null | undefined): bo
   return timingSafeEqual(hashBuffer, originalBuffer)
 }
 
+export async function ensureAuthSchema() {
+  if (authSchemaChecked) return
+
+  await prisma.$executeRawUnsafe(`
+DO $$
+BEGIN
+  CREATE TYPE "UserRole" AS ENUM ('ADMIN', 'USER');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+`)
+
+  await prisma.$executeRawUnsafe(`
+ALTER TABLE "users"
+  ADD COLUMN IF NOT EXISTS "password_hash" TEXT,
+  ADD COLUMN IF NOT EXISTS "role" "UserRole" DEFAULT 'USER',
+  ADD COLUMN IF NOT EXISTS "session_token" TEXT,
+  ADD COLUMN IF NOT EXISTS "session_expires_at" TIMESTAMP(3);
+`)
+
+  await prisma.$executeRawUnsafe(`
+UPDATE "users"
+SET
+  "password_hash" = COALESCE("password_hash", 'LEGACY_INVALID'),
+  "role" = COALESCE("role", 'USER'::"UserRole");
+`)
+
+  await prisma.$executeRawUnsafe(`
+ALTER TABLE "users"
+  ALTER COLUMN "password_hash" SET NOT NULL,
+  ALTER COLUMN "role" SET NOT NULL,
+  ALTER COLUMN "role" SET DEFAULT 'USER';
+`)
+
+  await prisma.$executeRawUnsafe(`
+CREATE UNIQUE INDEX IF NOT EXISTS "users_session_token_key" ON "users"("session_token");
+`)
+
+  authSchemaChecked = true
+}
+
 export async function ensureAdminExists() {
+  await ensureAuthSchema()
   const admin = await prisma.user.findUnique({ where: { email: ADMIN_EMAIL } })
 
   if (!admin) {
@@ -59,6 +103,7 @@ export async function ensureAdminExists() {
 }
 
 export async function createSession(userId: string) {
+  await ensureAuthSchema()
   const token = randomBytes(48).toString('hex')
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS)
 
@@ -81,6 +126,7 @@ export async function createSession(userId: string) {
 }
 
 export async function clearSession(token?: string) {
+  await ensureAuthSchema()
   const cookieStore = await cookies()
   const currentToken = token || cookieStore.get(SESSION_COOKIE)?.value
 
@@ -95,6 +141,7 @@ export async function clearSession(token?: string) {
 }
 
 export async function getAuthenticatedUser() {
+  await ensureAuthSchema()
   const cookieStore = await cookies()
   const token = cookieStore.get(SESSION_COOKIE)?.value
   if (!token) return null

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { Prisma } from '@prisma/client'
 import prisma from '@/lib/prisma'
-import { createSession, ensureAdminExists, verifyPassword } from '@/lib/auth'
+import { createSession, ensureAdminExists, ensureAuthSchema, verifyPassword } from '@/lib/auth'
 
 function getLoginInfraError(error: unknown): string | null {
   if (error instanceof Prisma.PrismaClientInitializationError) {
@@ -42,6 +42,7 @@ function getLoginInfraError(error: unknown): string | null {
 
 export async function POST(request: NextRequest) {
   try {
+    await ensureAuthSchema()
     await ensureAdminExists()
     const body = await request.json()
     const { email, password } = body
