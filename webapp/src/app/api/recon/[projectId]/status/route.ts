@@ -13,6 +13,7 @@ function getOrchestratorBaseUrl() {
 export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
     const { projectId } = await params
+    const orchestratorBaseUrl = getOrchestratorBaseUrl(request)
 
     const response = await fetch(`${getOrchestratorBaseUrl()}/recon/${projectId}/status`, {
       method: 'GET',
