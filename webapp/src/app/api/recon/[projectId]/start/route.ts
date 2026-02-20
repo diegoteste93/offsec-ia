@@ -1,15 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
+import { fetchReconBackend, isNetworkFetchError } from '@/lib/recon-backend'
 
-const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL
 const WEBAPP_URL = process.env.WEBAPP_URL
 
 interface RouteParams {
   params: Promise<{ projectId: string }>
-}
-
-function getOrchestratorBaseUrl(_request?: Request) {
-  return (RECON_ORCHESTRATOR_URL || 'http://127.0.0.1:8010').replace(/\/$/, '')
 }
 
 function getWebappBaseUrl(request: NextRequest) {
@@ -17,7 +13,7 @@ function getWebappBaseUrl(request: NextRequest) {
 
   const protocol = request.nextUrl.protocol.replace(':', '')
   const port = request.nextUrl.port || (protocol === 'https' ? '443' : '80')
-  const host = port === '80' || port === '443' ? `127.0.0.1` : `127.0.0.1:${port}`
+  const host = port === '80' || port === '443' ? '127.0.0.1' : `127.0.0.1:${port}`
   return `${protocol}://${host}`
 }
 
@@ -38,7 +34,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: 'Project has no target domain configured' }, { status: 400 })
     }
 
-    const response = await fetch(`${getOrchestratorBaseUrl()}/recon/${projectId}/start`, {
+    const { response, baseUrl } = await fetchReconBackend(`/recon/${projectId}/start`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -54,14 +50,14 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     if (!response.ok) {
       return NextResponse.json(
-        { error: data.detail || data.error || 'Failed to start recon' },
+        { error: data.detail || data.error || `Failed to start recon via ${baseUrl}` },
         { status: response.status }
       )
     }
 
     if (data.status === 'error') {
       return NextResponse.json(
-        { error: data.error || 'Recon backend returned an error state while starting.' },
+        { error: data.error || `Recon backend returned an error state while starting via ${baseUrl}.` },
         { status: 502 }
       )
     }
@@ -71,9 +67,9 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   } catch (error) {
     console.error('Error starting recon:', error)
 
-    if (error instanceof TypeError && error.message.includes('fetch')) {
+    if (isNetworkFetchError(error) || (error instanceof Error && error.message.includes('Recon backend unreachable'))) {
       return NextResponse.json(
-        { error: 'Recon backend unreachable. Configure RECON_ORCHESTRATOR_URL to your orchestrator host.' },
+        { error: error instanceof Error ? error.message : 'Recon backend unreachable.' },
         { status: 502 }
       )
     }
