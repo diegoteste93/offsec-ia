@@ -78,8 +78,17 @@ export function useAgentWebSocket({
 
   // Get WebSocket URL from environment
   const getWebSocketUrl = useCallback(() => {
-    const wsUrl = process.env.NEXT_PUBLIC_AGENT_WS_URL || 'ws://localhost:8090/ws/agent'
-    return wsUrl
+    const envWsUrl = process.env.NEXT_PUBLIC_AGENT_WS_URL
+    if (envWsUrl) {
+      return envWsUrl
+    }
+
+    if (typeof window !== 'undefined') {
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      return `${wsProtocol}//${window.location.hostname}:8090/ws/agent`
+    }
+
+    return 'ws://localhost:8090/ws/agent'
   }, [])
 
   // Send a message to the server

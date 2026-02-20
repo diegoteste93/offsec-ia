@@ -135,7 +135,7 @@ export default function GraphPage() {
     if (!projectId) return
     try {
       const response = await fetch(`/api/recon/${projectId}/download`, { method: 'HEAD' })
-      setHasReconData(response.ok)
+      setHasReconData(response.status === 200)
     } catch {
       setHasReconData(false)
     }
@@ -183,7 +183,7 @@ export default function GraphPage() {
     if (!projectId) return
     try {
       const response = await fetch(`/api/gvm/${projectId}/download`, { method: 'HEAD' })
-      setHasGvmData(response.ok)
+      setHasGvmData(response.status === 200)
     } catch {
       setHasGvmData(false)
     }
@@ -194,7 +194,7 @@ export default function GraphPage() {
     if (!projectId) return
     try {
       const response = await fetch(`/api/github-hunt/${projectId}/download`, { method: 'HEAD' })
-      setHasGithubHuntData(response.ok)
+      setHasGithubHuntData(response.status === 200)
     } catch {
       setHasGithubHuntData(false)
     }
