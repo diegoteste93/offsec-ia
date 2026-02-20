@@ -1,17 +1,20 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
 
-const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL || 'http://localhost:8010'
+const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL
 
 interface RouteParams {
   params: Promise<{ projectId: string }>
 }
 
-export async function GET(request: NextRequest, { params }: RouteParams) {
+function getOrchestratorBaseUrl() {
+  return (RECON_ORCHESTRATOR_URL || 'http://127.0.0.1:8010').replace(/\/$/, '')
+}
+
+export async function GET(_request: Request, { params }: RouteParams) {
   try {
     const { projectId } = await params
 
-    // Call recon orchestrator to get status
-    const response = await fetch(`${RECON_ORCHESTRATOR_URL}/recon/${projectId}/status`, {
+    const response = await fetch(`${getOrchestratorBaseUrl()}/recon/${projectId}/status`, {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',
@@ -21,7 +24,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}))
       return NextResponse.json(
-        { error: errorData.detail || 'Failed to get recon status' },
+        { error: errorData.detail || errorData.error || 'Failed to get recon status' },
         { status: response.status }
       )
     }
@@ -32,7 +35,6 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   } catch (error) {
     console.error('Error getting recon status:', error)
 
-    // If orchestrator is not available, return idle status
     if (error instanceof TypeError && error.message.includes('fetch')) {
       return NextResponse.json({
         project_id: (await params).projectId,
