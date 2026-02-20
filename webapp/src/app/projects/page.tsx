@@ -16,6 +16,8 @@ export default function ProjectsPage() {
   const [showUserModal, setShowUserModal] = useState(false)
   const [newUserName, setNewUserName] = useState('')
   const [newUserEmail, setNewUserEmail] = useState('')
+  const [newUserPassword, setNewUserPassword] = useState('')
+  const [newUserRole, setNewUserRole] = useState<'ADMIN' | 'USER'>('USER')
 
   const { data: users, isLoading: usersLoading } = useUsers()
   const { data: projects, isLoading: projectsLoading, refetch } = useProjects(userId || undefined)
@@ -58,12 +60,16 @@ export default function ProjectsPage() {
     try {
       const user = await createUserMutation.mutateAsync({
         name: newUserName,
-        email: newUserEmail
+        email: newUserEmail,
+        password: newUserPassword,
+        role: newUserRole
       })
       setUserId(user.id)
       setShowUserModal(false)
       setNewUserName('')
       setNewUserEmail('')
+      setNewUserPassword('')
+      setNewUserRole('USER')
     } catch (error) {
       alert(error instanceof Error ? error.message : 'Failed to create user')
     }
@@ -216,6 +222,28 @@ export default function ProjectsPage() {
                   placeholder="Enter email address"
                   required
                 />
+              </div>
+              <div className="formGroup">
+                <label className="formLabel formLabelRequired">Password</label>
+                <input
+                  type="password"
+                  className="textInput"
+                  value={newUserPassword}
+                  onChange={(e) => setNewUserPassword(e.target.value)}
+                  placeholder="Enter password"
+                  required
+                />
+              </div>
+              <div className="formGroup">
+                <label className="formLabel formLabelRequired">Role</label>
+                <select
+                  className="select"
+                  value={newUserRole}
+                  onChange={(e) => setNewUserRole(e.target.value as 'ADMIN' | 'USER')}
+                >
+                  <option value="USER">User</option>
+                  <option value="ADMIN">Admin</option>
+                </select>
               </div>
               <div className={styles.modalActions}>
                 <button
