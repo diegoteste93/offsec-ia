@@ -59,6 +59,7 @@ export default function GraphPage() {
   const {
     state: reconState,
     isLoading: isReconLoading,
+    error: reconError,
     startRecon,
   } = useReconStatus({
     projectId,
@@ -249,8 +250,13 @@ export default function GraphPage() {
     if (result) {
       setIsReconModalOpen(false)
       setActiveLogsDrawer('recon')
+      return
     }
-  }, [startRecon, clearLogs])
+
+    if (reconError) {
+      alert(reconError)
+    }
+  }, [startRecon, clearLogs, reconError])
 
   const handleDownloadJSON = useCallback(async () => {
     if (!projectId) return

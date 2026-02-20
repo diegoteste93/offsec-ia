@@ -8,12 +8,17 @@ interface RouteParams {
   params: Promise<{ projectId: string }>
 }
 
-function getBaseUrl(request: NextRequest, envUrl: string | undefined, fallbackPort: number) {
-  if (envUrl) return envUrl.replace(/\/$/, '')
+function getOrchestratorBaseUrl() {
+  return (RECON_ORCHESTRATOR_URL || 'http://127.0.0.1:8010').replace(/\/$/, '')
+}
 
-  const protocol = request.nextUrl.protocol
-  const hostname = request.nextUrl.hostname
-  return `${protocol}//${hostname}:${fallbackPort}`
+function getWebappBaseUrl(request: NextRequest) {
+  if (WEBAPP_URL) return WEBAPP_URL.replace(/\/$/, '')
+
+  const protocol = request.nextUrl.protocol.replace(':', '')
+  const port = request.nextUrl.port || (protocol === 'https' ? '443' : '80')
+  const host = port === '80' || port === '443' ? `127.0.0.1` : `127.0.0.1:${port}`
+  return `${protocol}://${host}`
 }
 
 export async function POST(request: NextRequest, { params }: RouteParams) {
@@ -33,10 +38,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: 'Project has no target domain configured' }, { status: 400 })
     }
 
-    const orchestratorBaseUrl = getBaseUrl(request, RECON_ORCHESTRATOR_URL, 8010)
-    const webappBaseUrl = getBaseUrl(request, WEBAPP_URL, 3000)
-
-    const response = await fetch(`${orchestratorBaseUrl}/recon/${projectId}/start`, {
+    const response = await fetch(`${getOrchestratorBaseUrl()}/recon/${projectId}/start`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -44,19 +46,26 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       body: JSON.stringify({
         project_id: projectId,
         user_id: project.userId,
-        webapp_api_url: webappBaseUrl,
+        webapp_api_url: getWebappBaseUrl(request),
       }),
     })
 
+    const data = await response.json().catch(() => ({}))
+
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}))
       return NextResponse.json(
-        { error: errorData.detail || errorData.error || 'Failed to start recon' },
+        { error: data.detail || data.error || 'Failed to start recon' },
         { status: response.status }
       )
     }
 
-    const data = await response.json()
+    if (data.status === 'error') {
+      return NextResponse.json(
+        { error: data.error || 'Recon backend returned an error state while starting.' },
+        { status: 502 }
+      )
+    }
+
     return NextResponse.json(data)
 
   } catch (error) {

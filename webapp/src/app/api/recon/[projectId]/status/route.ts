@@ -6,9 +6,8 @@ interface RouteParams {
   params: Promise<{ projectId: string }>
 }
 
-function getOrchestratorBaseUrl(request: NextRequest) {
-  if (RECON_ORCHESTRATOR_URL) return RECON_ORCHESTRATOR_URL.replace(/\/$/, '')
-  return `${request.nextUrl.protocol}//${request.nextUrl.hostname}:8010`
+function getOrchestratorBaseUrl() {
+  return (RECON_ORCHESTRATOR_URL || 'http://127.0.0.1:8010').replace(/\/$/, '')
 }
 
 export async function GET(request: NextRequest, { params }: RouteParams) {
@@ -16,7 +15,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     const { projectId } = await params
     const orchestratorBaseUrl = getOrchestratorBaseUrl(request)
 
-    const response = await fetch(`${orchestratorBaseUrl}/recon/${projectId}/status`, {
+    const response = await fetch(`${getOrchestratorBaseUrl()}/recon/${projectId}/status`, {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',
