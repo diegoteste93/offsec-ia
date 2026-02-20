@@ -1,12 +1,37 @@
 'use client'
 
 import Image from 'next/image'
+import { useEffect, useState } from 'react'
 import { ChevronDown } from 'lucide-react'
+import { useRouter } from 'next/navigation'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { ProjectSelector } from './ProjectSelector'
 import styles from './GlobalHeader.module.css'
 
+interface AuthUser {
+  id: string
+  name: string
+  email: string
+  role: 'ADMIN' | 'USER'
+}
+
 export function GlobalHeader() {
+  const router = useRouter()
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null)
+
+  useEffect(() => {
+    fetch('/api/auth/me')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => setAuthUser(data))
+      .catch(() => setAuthUser(null))
+  }, [])
+
+  const handleLogout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' })
+    router.push('/login')
+    router.refresh()
+  }
+
   return (
     <header className={styles.header}>
       <div className={styles.logo}>
@@ -20,7 +45,6 @@ export function GlobalHeader() {
       <div className={styles.spacer} />
 
       <div className={styles.actions}>
-        {/* Project Selector */}
         <ProjectSelector />
 
         <div className={styles.divider} />
@@ -29,12 +53,11 @@ export function GlobalHeader() {
 
         <div className={styles.divider} />
 
-        {/* User Menu - Mock */}
-        <button className={styles.userButton}>
+        <button className={styles.userButton} onClick={handleLogout} title="Logout">
           <div className={styles.avatar}>
-            <span>RA</span>
+            <span>{authUser?.name?.slice(0, 2).toUpperCase() || 'RA'}</span>
           </div>
-          <span className={styles.userName}>Admin</span>
+          <span className={styles.userName}>{authUser?.name || 'Admin'}</span>
           <ChevronDown size={14} />
         </button>
       </div>
