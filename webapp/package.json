@@ -5,17 +5,18 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "prisma generate && next build",
     "start": "next start",
     "lint": "next lint",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@prisma/client": "^6.19.2",
     "@tanstack/react-query": "^5.62.0",
     "@types/react-syntax-highlighter": "^15.5.13",
     "d3-force": "^3.0.0",
-"lucide-react": "^0.562.0",
+    "lucide-react": "^0.562.0",
     "neo4j-driver": "^6.0.0",
     "next": "^16.1.0",
     "prisma": "^6.19.2",
