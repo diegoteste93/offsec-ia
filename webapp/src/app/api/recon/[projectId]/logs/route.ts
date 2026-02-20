@@ -5,6 +5,10 @@ interface RouteParams {
   params: Promise<{ projectId: string }>
 }
 
+function getOrchestratorBaseUrl(_request?: Request) {
+  return (RECON_ORCHESTRATOR_URL || 'http://127.0.0.1:8010').replace(/\/$/, '')
+}
+
 export async function GET(request: NextRequest, { params }: RouteParams) {
   const { projectId } = await params
 
