@@ -80,7 +80,8 @@ export async function HEAD(request: NextRequest, { params }: RouteParams) {
     const jsonFilePath = path.join(GITHUB_HUNT_OUTPUT_PATH, `github_hunt_${projectId}.json`)
 
     if (!existsSync(jsonFilePath)) {
-      return new NextResponse(null, { status: 404 })
+      // No output generated yet for this project: return 204 to avoid noisy 404s
+      return new NextResponse(null, { status: 204 })
     }
 
     return new NextResponse(null, { status: 200 })

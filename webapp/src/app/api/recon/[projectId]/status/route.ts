@@ -8,6 +8,7 @@ interface RouteParams {
 export async function GET(_request: Request, { params }: RouteParams) {
   try {
     const { projectId } = await params
+    const orchestratorBaseUrl = getOrchestratorBaseUrl(request)
 
     const { response } = await fetchReconBackend(`/recon/${projectId}/status`, {
       method: 'GET',
