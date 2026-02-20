@@ -1,6 +1,9 @@
 import { NextRequest } from 'next/server'
 import { fetchReconBackend, isNetworkFetchError } from '@/lib/recon-backend'
 
+// Legacy compatibility constant: keeps old helper call sites build-safe if reintroduced
+const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL
+
 interface RouteParams {
   params: Promise<{ projectId: string }>
 }
