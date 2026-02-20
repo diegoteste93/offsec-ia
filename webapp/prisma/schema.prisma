@@ -8,14 +8,23 @@ datasource db {
 }
 
 model User {
-  id        String    @id @default(cuid())
-  name      String
-  email     String    @unique
-  projects  Project[]
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
+  id               String    @id @default(cuid())
+  name             String
+  email            String    @unique
+  passwordHash     String    @map("password_hash")
+  role             UserRole  @default(USER)
+  sessionToken     String?   @unique @map("session_token")
+  sessionExpiresAt DateTime? @map("session_expires_at")
+  projects         Project[]
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
 
   @@map("users")
+}
+
+enum UserRole {
+  ADMIN
+  USER
 }
 
 model Project {
