@@ -22,6 +22,18 @@ function isPasswordHashFormatValid(stored: string | null | undefined): stored is
   return Boolean(salt && hash)
 }
 
+
+function shouldUseSecureCookie(): boolean {
+  const forced = process.env.AUTH_COOKIE_SECURE
+  if (forced === 'true') return true
+  if (forced === 'false') return false
+
+  const webappUrl = process.env.WEBAPP_URL || ''
+  if (webappUrl.startsWith('http://')) return false
+  if (webappUrl.startsWith('https://')) return true
+
+  return process.env.NODE_ENV === 'production'
+}
 function verifyPassword(password: string, stored: string | null | undefined): boolean {
   if (!isPasswordHashFormatValid(stored)) return false
 
@@ -119,7 +131,7 @@ export async function createSession(userId: string) {
   cookieStore.set(SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
+    secure: shouldUseSecureCookie(),
     path: '/',
     expires: expiresAt
   })
@@ -169,4 +181,4 @@ export async function getAuthenticatedUser() {
   return user
 }
 
-export { hashPassword, verifyPassword, SESSION_COOKIE, isPasswordHashFormatValid }
+export { hashPassword, verifyPassword, SESSION_COOKIE, isPasswordHashFormatValid, shouldUseSecureCookie }
