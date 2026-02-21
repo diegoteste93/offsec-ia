@@ -1,11 +1,17 @@
 import { NextResponse } from 'next/server'
 import { fetchReconBackend, isNetworkFetchError } from '@/lib/recon-backend'
 
+const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL
+
 interface RouteParams {
   params: Promise<{ projectId: string }>
 }
 
-export async function GET(_request: Request, { params }: RouteParams) {
+function getOrchestratorBaseUrl(_request?: Request) {
+  return (RECON_ORCHESTRATOR_URL || 'http://127.0.0.1:8010').replace(/\/$/, '')
+}
+
+export async function GET(request: Request, { params }: RouteParams) {
   try {
     const { projectId } = await params
     const orchestratorBaseUrl = getOrchestratorBaseUrl(request)
@@ -14,6 +20,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',
+        'X-Recon-Preferred-Backend': orchestratorBaseUrl,
       },
     })
 
