@@ -55,6 +55,15 @@ webapp/
 
 ---
 
+## Authentication
+
+The web application now requires authentication for all routes except `/login` and health checks.
+
+- Default admin user: `admin@local`
+- Default admin password: `Mudar123@`
+
+You can create, update, and delete users via `/api/users` after logging in as an admin.
+
 ## Prerequisites
 
 **Neo4j must be running first.** This webapp connects to the existing Neo4j instance in `../graph_db/`.

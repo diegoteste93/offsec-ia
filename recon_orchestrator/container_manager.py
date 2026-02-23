@@ -171,9 +171,19 @@ class ContainerManager:
             try:
                 self.client.images.get(self.recon_image)
             except NotFound:
+                recon_path_obj = Path(recon_path)
+                dockerfile_path = recon_path_obj / "Dockerfile"
+
+                if not recon_path_obj.is_dir() or not dockerfile_path.exists():
+                    raise RuntimeError(
+                        f"Recon image '{self.recon_image}' not found and RECON_PATH '{recon_path}' is invalid. "
+                        "Set RECON_PATH to a valid recon source directory containing a Dockerfile "
+                        "or pre-build/pull the recon image before starting scans."
+                    )
+
                 logger.info(f"Building recon image from {recon_path}")
                 self.client.images.build(
-                    path=recon_path,
+                    path=str(recon_path_obj),
                     tag=self.recon_image,
                     rm=True,
                 )

@@ -38,11 +38,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-RECON_PATH = os.getenv("RECON_PATH", "/home/samuele/Progetti didattici/RedAmon/recon")
+RECON_PATH = os.getenv("RECON_PATH", "/app/recon")
 RECON_IMAGE = os.getenv("RECON_IMAGE", "redamon-recon:latest")
-GVM_SCAN_PATH = os.getenv("GVM_SCAN_PATH", "/home/samuele/Progetti didattici/RedAmon/gvm_scan")
+GVM_SCAN_PATH = os.getenv("GVM_SCAN_PATH", "/app/gvm_scan")
 GVM_IMAGE = os.getenv("GVM_IMAGE", "redamon-vuln-scanner:latest")
-GITHUB_HUNT_PATH = os.getenv("GITHUB_HUNT_PATH", "/home/samuele/Progetti didattici/RedAmon/github_secret_hunt")
+GITHUB_HUNT_PATH = os.getenv("GITHUB_HUNT_PATH", "/app/github_secret_hunt")
 GITHUB_HUNT_IMAGE = os.getenv("GITHUB_HUNT_IMAGE", "redamon-github-hunter:latest")
 VERSION = "1.0.0"
 
