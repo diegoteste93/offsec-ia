@@ -100,6 +100,10 @@ export function useReconStatus({
       }
 
       const data: ReconState = await response.json()
+      if (data.status === 'error') {
+        throw new Error(data.error || 'Recon backend returned error status')
+      }
+
       setState(data)
       previousStatusRef.current = data.status
       return data
