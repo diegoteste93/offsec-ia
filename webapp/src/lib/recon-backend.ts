@@ -6,8 +6,11 @@ const DEFAULT_RECON_BACKENDS = [
   'http://localhost:8010',
 ]
 
+<<<<<<< codex/add-login-feature-with-user-management-5w699d
 const DEFAULT_RETRY_STATUSES = [502, 503, 504]
 
+=======
+>>>>>>> master
 function normalizeUrl(url: string): string {
   return url.replace(/\/$/, '')
 }
@@ -27,6 +30,7 @@ export function isNetworkFetchError(error: unknown): boolean {
   return error instanceof TypeError && error.message.includes('fetch')
 }
 
+<<<<<<< codex/add-login-feature-with-user-management-5w699d
 function shouldRetryStatus(status: number, retryStatuses: number[]): boolean {
   return retryStatuses.includes(status)
 }
@@ -45,16 +49,28 @@ export async function fetchReconBackend(
   const retryStatuses = options.retryStatuses ?? DEFAULT_RETRY_STATUSES
   let lastNetworkError: unknown = null
   let lastRetryableResponse: { response: Response; baseUrl: string } | null = null
+=======
+export async function fetchReconBackend(
+  path: string,
+  init?: RequestInit,
+  extraCandidates: string[] = []
+): Promise<{ response: Response; baseUrl: string }> {
+  const bases = getReconBackendCandidates(extraCandidates)
+  let lastNetworkError: unknown = null
+>>>>>>> master
 
   for (const baseUrl of bases) {
     try {
       const response = await fetch(`${baseUrl}${path}`, init)
+<<<<<<< codex/add-login-feature-with-user-management-5w699d
 
       if (shouldRetryStatus(response.status, retryStatuses)) {
         lastRetryableResponse = { response, baseUrl }
         continue
       }
 
+=======
+>>>>>>> master
       return { response, baseUrl }
     } catch (error) {
       if (isNetworkFetchError(error)) {
@@ -66,10 +82,13 @@ export async function fetchReconBackend(
     }
   }
 
+<<<<<<< codex/add-login-feature-with-user-management-5w699d
   if (lastRetryableResponse) {
     return lastRetryableResponse
   }
 
+=======
+>>>>>>> master
   if (lastNetworkError) {
     throw new Error(`Recon backend unreachable on all candidates: ${bases.join(', ')}`)
   }
