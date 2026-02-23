@@ -59,25 +59,24 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       getRuntimeReconCandidates(request)
     )
 
-    const data = await response.json().catch(() => ({}))
-
-    const data = await response.json().catch(() => ({}))
+    const backendPayload: { status?: string; detail?: string; error?: string } =
+      await response.json().catch(() => ({}))
 
     if (!response.ok) {
       return NextResponse.json(
-        { error: data.detail || data.error || `Failed to start recon via ${baseUrl}` },
+        { error: backendPayload.detail || backendPayload.error || `Failed to start recon via ${baseUrl}` },
         { status: response.status }
       )
     }
 
-    if (data.status === 'error') {
+    if (backendPayload.status === 'error') {
       return NextResponse.json(
-        { error: data.error || `Recon backend returned an error state while starting via ${baseUrl}.` },
+        { error: backendPayload.error || `Recon backend returned an error state while starting via ${baseUrl}.` },
         { status: 502 }
       )
     }
 
-    return NextResponse.json(data)
+    return NextResponse.json(backendPayload)
 
   } catch (error) {
     console.error('Error starting recon:', error)
