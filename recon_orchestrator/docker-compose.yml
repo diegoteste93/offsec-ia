@@ -19,7 +19,7 @@ services:
       - ${HOST_RECON_PATH:-../recon}/output:/app/recon/output:rw
     environment:
       # RECON_PATH: Host path for Docker SDK volume mounts when spawning recon containers
-      - RECON_PATH=${HOST_RECON_PATH:-/home/samuele/Progetti didattici/RedAmon/recon}
+      - RECON_PATH=${HOST_RECON_PATH:-../recon}
       - RECON_IMAGE=redamon-recon:latest
       # Forwarded to spawned recon containers (host network, so localhost)
       - NVD_API_KEY=${NVD_API_KEY:-}
