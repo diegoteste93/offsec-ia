@@ -61,6 +61,8 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     const data = await response.json().catch(() => ({}))
 
+    const data = await response.json().catch(() => ({}))
+
     if (!response.ok) {
       return NextResponse.json(
         { error: data.detail || data.error || `Failed to start recon via ${baseUrl}` },
