@@ -12,6 +12,15 @@ function getOrchestratorBaseUrl(_request?: Request) {
   return (RECON_ORCHESTRATOR_URL || 'http://127.0.0.1:8010').replace(/\/$/, '')
 }
 
+function getRuntimeReconCandidates(request: NextRequest) {
+  const protocol = request.nextUrl.protocol.replace(':', '')
+  const hostname = request.nextUrl.hostname
+  return [
+    `${protocol}://${hostname}:8010`,
+    `http://${hostname}:8010`,
+  ]
+}
+
 export async function GET(request: NextRequest, { params }: RouteParams) {
   const { projectId } = await params
 
@@ -21,7 +30,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         'Accept': 'text/event-stream',
       },
       signal: request.signal,
-    })
+    }, getRuntimeReconCandidates(request))
 
     if (!response.ok) {
       return new Response(

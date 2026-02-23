@@ -11,6 +11,14 @@ function getOrchestratorBaseUrl(_request?: Request) {
   return (RECON_ORCHESTRATOR_URL || 'http://127.0.0.1:8010').replace(/\/$/, '')
 }
 
+function getRuntimeReconCandidates(request: Request) {
+  const url = new URL(request.url)
+  return [
+    `${url.protocol}//${url.hostname}:8010`,
+    `http://${url.hostname}:8010`,
+  ]
+}
+
 export async function GET(request: Request, { params }: RouteParams) {
   try {
     const { projectId } = await params
@@ -22,7 +30,7 @@ export async function GET(request: Request, { params }: RouteParams) {
         'Content-Type': 'application/json',
         'X-Recon-Preferred-Backend': orchestratorBaseUrl,
       },
-    })
+    }, getRuntimeReconCandidates(request))
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}))

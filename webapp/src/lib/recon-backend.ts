@@ -10,10 +10,10 @@ function normalizeUrl(url: string): string {
   return url.replace(/\/$/, '')
 }
 
-export function getReconBackendCandidates(): string[] {
+export function getReconBackendCandidates(extraCandidates: string[] = []): string[] {
   const unique = new Set<string>()
 
-  for (const candidate of DEFAULT_RECON_BACKENDS) {
+  for (const candidate of [...extraCandidates, ...DEFAULT_RECON_BACKENDS]) {
     if (!candidate) continue
     unique.add(normalizeUrl(candidate))
   }
@@ -25,8 +25,12 @@ export function isNetworkFetchError(error: unknown): boolean {
   return error instanceof TypeError && error.message.includes('fetch')
 }
 
-export async function fetchReconBackend(path: string, init?: RequestInit): Promise<{ response: Response; baseUrl: string }> {
-  const bases = getReconBackendCandidates()
+export async function fetchReconBackend(
+  path: string,
+  init?: RequestInit,
+  extraCandidates: string[] = []
+): Promise<{ response: Response; baseUrl: string }> {
+  const bases = getReconBackendCandidates(extraCandidates)
   let lastNetworkError: unknown = null
 
   for (const baseUrl of bases) {

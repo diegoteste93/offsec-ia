@@ -8,6 +8,15 @@ interface RouteParams {
   params: Promise<{ projectId: string }>
 }
 
+function getRuntimeReconCandidates(request: NextRequest) {
+  const protocol = request.nextUrl.protocol.replace(':', '')
+  const hostname = request.nextUrl.hostname
+  return [
+    `${protocol}://${hostname}:8010`,
+    `http://${hostname}:8010`,
+  ]
+}
+
 function getWebappBaseUrl(request: NextRequest) {
   if (WEBAPP_URL) return WEBAPP_URL.replace(/\/$/, '')
 
@@ -34,17 +43,23 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: 'Project has no target domain configured' }, { status: 400 })
     }
 
-    const { response, baseUrl } = await fetchReconBackend(`/recon/${projectId}/start`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+    const { response, baseUrl } = await fetchReconBackend(
+      `/recon/${projectId}/start`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          project_id: projectId,
+          user_id: project.userId,
+          webapp_api_url: getWebappBaseUrl(request),
+        }),
       },
-      body: JSON.stringify({
-        project_id: projectId,
-        user_id: project.userId,
-        webapp_api_url: getWebappBaseUrl(request),
-      }),
-    })
+      getRuntimeReconCandidates(request)
+    )
+
+    const data = await response.json().catch(() => ({}))
 
     const data = await response.json().catch(() => ({}))
 
